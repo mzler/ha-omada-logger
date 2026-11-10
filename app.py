@@ -519,7 +519,14 @@ ha_client = HomeAssistantClient(config)
 # Omada Controller REST API Client
 # ---------------------------------------------------------------------------
 class OmadaClient:
-    """Robust, authenticated client for TP-Link Omada Software / Hardware Controller"""
+    """
+    Robust, authenticated client for TP-Link Omada Software Controller v4 & v5+.
+
+    API differences between versions:
+    - v4.x: POST /api/v2/login  (no controller-ID prefix)
+    - v5.x: GET  /api/info  ->  omadacId  ->  POST /{omadacId}/api/v2/login
+    The client auto-detects the controller version on first connect.
+    """
 
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -527,7 +534,10 @@ class OmadaClient:
         self.token: Optional[str] = None
         self.cookies: httpx.Cookies = httpx.Cookies()
         self._lock = asyncio.Lock()
-        self.prev_port_speeds: Dict[Tuple[str, int], int] = {}  # (switch_mac, port) -> last known linkSpeed
+        self._omadac_id: Optional[str] = None      # Controller ID, only needed for v5+
+        self._api_prefix: str = ""                  # e.g. "/{omadacId}" for v5+ or "" for v4
+        self._controller_version: Optional[str] = None
+        self.prev_port_speeds: Dict[Tuple[str, int], int] = {}
         self.last_poll_status: Dict[str, Any] = {
             "success": False,
             "last_check": None,
@@ -542,20 +552,63 @@ class OmadaClient:
             timeout=httpx.Timeout(15.0, connect=10.0),
             cookies=self.cookies,
             headers={
-                "User-Agent": "OmadaDiagnosticAdvisor/1.0",
+                "User-Agent": "OmadaDiagnosticAdvisor/1.1",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
         )
 
+    async def _discover_controller_info(self) -> bool:
+        """
+        Fetches /api/info to detect controller version and omadacId (v5+).
+        Falls back gracefully to v4 mode if endpoint is unavailable.
+        """
+        try:
+            async with self._build_client() as client:
+                resp = await client.get("/api/info")
+                if resp.status_code == 200:
+                    info = resp.json()
+                    result = info.get("result", {})
+                    self._controller_version = result.get("controllerVer", "unknown")
+                    self._omadac_id = result.get("omadacId", "")
+                    if self._omadac_id:
+                        self._api_prefix = f"/{self._omadac_id}"
+                        logger.info(
+                            f"Omada Controller v{self._controller_version} detected (v5+ API). "
+                            f"omadacId={self._omadac_id}"
+                        )
+                    else:
+                        self._api_prefix = ""
+                        logger.info(
+                            f"Omada Controller v{self._controller_version} detected (v4 API, no omadacId)."
+                        )
+                    return True
+                else:
+                    # Older controllers may not have /api/info — treat as v4
+                    logger.info(f"GET /api/info returned HTTP {resp.status_code}. Assuming v4 API (no omadacId).")
+                    self._api_prefix = ""
+                    return True
+        except httpx.ConnectError:
+            logger.warning(f"Cannot reach Omada Controller at {self.base_url} (connection refused / no route).")
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout reaching Omada Controller at {self.base_url}.")
+        except Exception as e:
+            logger.error(f"Error during controller discovery: {type(e).__name__}: {e}")
+        return False
+
     async def login(self) -> bool:
         """
-        Authenticate against Omada Controller:
-        POST /api/v2/login
-        Body: {"username": omada_user, "password": omada_password}
-        Extract token from result.token, save cookies.
+        Authenticate against Omada Controller.
+        Auto-discovers API version/prefix on first call.
+        v4: POST /api/v2/login
+        v5: POST /{omadacId}/api/v2/login
         """
-        url = "/api/v2/login"
+        # Discover controller version if not done yet
+        if self._controller_version is None:
+            if not await self._discover_controller_info():
+                return False
+
+        url = f"{self._api_prefix}/api/v2/login"
         payload = {"username": self.cfg.omada_user, "password": self.cfg.omada_password}
 
         try:
@@ -570,14 +623,31 @@ class OmadaClient:
                         result = data["result"]
                         self.token = result.get("token")
                         self.cookies.update(resp.cookies)
-                        logger.info("Successfully authenticated with Omada Controller.")
+                        logger.info(
+                            f"Successfully authenticated with Omada Controller "
+                            f"(version={self._controller_version}, prefix='{self._api_prefix}')."
+                        )
                         return True
                     else:
                         msg = data.get("msg", "Unknown error")
                         logger.error(f"Omada login rejected: errorCode={error_code}, msg={msg}")
+                elif resp.status_code == 500:
+                    # 500 on /api/v2/login (no prefix) almost always means v5+ controller.
+                    # Reset and retry with fresh discovery.
+                    if not self._api_prefix:
+                        logger.warning(
+                            "HTTP 500 on v4 login endpoint. Controller may be v5+. "
+                            "Forcing re-discovery of omadacId..."
+                        )
+                        self._controller_version = None
+                        self._api_prefix = ""
+                        self._omadac_id = None
+                        return False  # Will retry after re-discovery on next poll
+                    logger.error(f"Omada login failed with HTTP 500: {resp.text[:200]}")
                 else:
                     logger.error(f"Omada login failed with HTTP {resp.status_code}: {resp.text[:200]}")
-        except httpx.ConnectError as e:
+
+        except httpx.ConnectError:
             logger.warning(f"Could not connect to Omada Controller at {self.base_url}: Connection refused / host unreachable.")
         except httpx.TimeoutException:
             logger.warning(f"Timeout connecting to Omada Controller at {self.base_url}.")
@@ -600,20 +670,18 @@ class OmadaClient:
                 try:
                     async with self._build_client() as client:
                         resp = await client.request(method, path, headers=headers, **kwargs)
-
-                        # Update cookies
                         self.cookies.update(resp.cookies)
 
                         if resp.status_code in (401, 403):
                             logger.info(f"Session expired (HTTP {resp.status_code}). Triggering re-login...")
                             self.token = None
                             if await self.login():
-                                continue  # Retry with fresh token
+                                continue
                             return None
 
                         if resp.status_code == 200:
                             data = resp.json()
-                            if data.get("errorCode") in (-1001, -1002, -1005):  # Common Omada session expired codes
+                            if data.get("errorCode") in (-1001, -1002, -1005):
                                 logger.info(f"Omada error code {data.get('errorCode')}. Re-authenticating...")
                                 self.token = None
                                 if await self.login():
@@ -628,8 +696,8 @@ class OmadaClient:
             return None
 
     async def get_devices(self) -> List[Dict[str, Any]]:
-        """GET /api/v2/sites/{omada_site}/devices"""
-        path = f"/api/v2/sites/{self.cfg.omada_site}/devices"
+        """GET /{prefix}/api/v2/sites/{omada_site}/devices"""
+        path = f"{self._api_prefix}/api/v2/sites/{self.cfg.omada_site}/devices"
         data = await self._request_with_retry("GET", path)
         if not data or data.get("errorCode", 0) != 0:
             return []
@@ -641,8 +709,8 @@ class OmadaClient:
         return []
 
     async def get_device_clients(self, device_mac: str) -> List[Dict[str, Any]]:
-        """GET /api/v2/sites/{omada_site}/cmd/devices/{deviceMac}/clients"""
-        path = f"/api/v2/sites/{self.cfg.omada_site}/cmd/devices/{device_mac}/clients"
+        """GET /{prefix}/api/v2/sites/{omada_site}/cmd/devices/{deviceMac}/clients"""
+        path = f"{self._api_prefix}/api/v2/sites/{self.cfg.omada_site}/cmd/devices/{device_mac}/clients"
         data = await self._request_with_retry("GET", path)
         if not data or data.get("errorCode", 0) != 0:
             return []
@@ -1068,7 +1136,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -1150,7 +1218,7 @@ async def api_get_trends():
 
 
 @app.get("/api/incidents/export")
-async def api_export_incidents(format: str = Query("json", regex="^(json|csv)$")):
+async def api_export_incidents(format: str = Query("json", pattern="^(json|csv)$")):
     incidents = await db_mgr.get_incidents(limit=1000)
     if format == "json":
         return JSONResponse(

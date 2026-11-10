@@ -2,6 +2,11 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.2.0] - 2026-11-10
+### Behoben
+- **Omada Controller v5+ API-Kompatibilität (HTTP 500 Login-Fix)**: Der API-Client erkennt nun automatisch die Controller-Version via `GET /api/info`, liest die `omadacId` aus und stellt alle Requests korrekt mit dem nötigen URL-Präfix `/{omadacId}/api/v2/...` (v5+) bzw. ohne Präfix `/api/v2/...` (v4) aus.
+- `FastAPIDeprecationWarning` behoben: `Query(regex=...)` → `Query(pattern=...)` für FastAPI 0.115+.
+
 ## [1.1.0] - 2026-11-10
 ### Hinzugefügt
 - Offizielles Add-on Icon (`icon.png`), Logo (`logo.png`) und Vektor-Grafik (`icon.svg`).
