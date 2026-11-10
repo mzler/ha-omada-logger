@@ -512,6 +512,38 @@ class HomeAssistantClient:
             },
         )
 
+    async def get_notify_services(self) -> List[str]:
+        """Fetch all available notify services from Home Assistant Core API"""
+        if not self._enabled:
+            return [
+                "none",
+                "notify.persistent_notification",
+                "notify.mobile_app_smartphone",
+            ]
+
+        url = f"{self.base_url}/services"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=self._get_headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    services_found = []
+                    for domain_info in data:
+                        if domain_info.get("domain") == "notify":
+                            services = domain_info.get("services", {})
+                            for s in sorted(services.keys()):
+                                s_full = f"notify.{s}"
+                                if s_full not in services_found:
+                                    services_found.append(s_full)
+                    if "notify.persistent_notification" not in services_found:
+                        services_found.insert(0, "notify.persistent_notification")
+                    return ["none"] + services_found
+                logger.warning(f"Failed to fetch HA services: HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Error fetching notify services from HA Core: {e}")
+
+        return ["none", "notify.persistent_notification"]
+
 
 ha_client = HomeAssistantClient(config)
 
@@ -1155,7 +1187,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.2.1",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -1284,6 +1316,75 @@ async def api_export_incidents(format: str = Query("json", pattern="^(json|csv)$
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+class NotifySettingsPayload(BaseModel):
+    notify_service: str
+    notify_min_severity: str = "CRITICAL"
+
+
+@app.get("/api/notify-services")
+async def api_get_notify_services():
+    services = await ha_client.get_notify_services()
+    return {
+        "services": services,
+        "current_service": config.notify_service,
+        "current_min_severity": config.notify_min_severity,
+    }
+
+
+@app.post("/api/settings/notify")
+async def api_save_notify_settings(payload: NotifySettingsPayload):
+    config.notify_service = payload.notify_service.strip()
+    config.notify_min_severity = payload.notify_min_severity.strip().upper()
+
+    # Persist to /data/options.json
+    try:
+        options = {}
+        if OPTIONS_FILE.exists():
+            with open(OPTIONS_FILE, "r", encoding="utf-8") as f:
+                options = json.load(f)
+        options["notify_service"] = config.notify_service
+        options["notify_min_severity"] = config.notify_min_severity
+        with open(OPTIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(options, f, indent=2)
+        logger.info(f"Saved notify configuration: {config.notify_service} [{config.notify_min_severity}]")
+    except Exception as e:
+        logger.warning(f"Could not persist options to {OPTIONS_FILE}: {e}")
+
+    # Sync sensors
+    stats = await db_mgr.get_stats()
+    await ha_client.sync_status_sensors(stats)
+
+    return {
+        "success": True,
+        "notify_service": config.notify_service,
+        "notify_min_severity": config.notify_min_severity,
+    }
+
+
+@app.post("/api/settings/notify/test")
+async def api_test_notify_settings(payload: NotifySettingsPayload):
+    target = payload.notify_service.strip()
+    if target == "none" or not target:
+        return {"success": False, "message": "Kein Benachrichtigungs-Dienst ausgewählt."}
+
+    old_service = config.notify_service
+    config.notify_service = target
+    try:
+        success = await ha_client.send_notification(
+            title="🔔 Omada Diagnostic Advisor Test",
+            message=f"Test-Benachrichtigung erfolgreich empfangen! (Dienst: {target})",
+            severity="CRITICAL",  # bypass min_severity for test
+            action="Advisor Test",
+        )
+    finally:
+        config.notify_service = old_service
+
+    if success:
+        return {"success": True, "message": f"Test-Benachrichtigung an '{target}' erfolgreich gesendet!"}
+    else:
+        return {"success": False, "message": f"Fehler beim Senden an '{target}'. Existiert der Dienst in Home Assistant?"}
 
 
 # ---------------------------------------------------------------------------
@@ -1684,6 +1785,27 @@ async def dashboard(request: Request):
       70% {{ box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }}
       100% {{ box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }}
     }}
+
+    /* Modal Backdrop & Box */
+    .modal-backdrop {{
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+    }}
+    .modal-box {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 24px;
+      max-width: 520px;
+      width: 90%;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
   </style>
 </head>
 <body>
@@ -1698,11 +1820,59 @@ async def dashboard(request: Request):
       </div>
       <div class="header-actions">
         <button class="btn btn-primary" onclick="pollNow()" id="btn-scan">🔄 Jetzt prüfen</button>
+        <button class="btn btn-secondary" onclick="openNotifyModal()">🔔 Benachrichtigung</button>
         <button class="btn btn-secondary" onclick="resolveAll()">✓ Alle als behoben markieren</button>
         <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=csv" download>📥 CSV Export</a>
         <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=json" download>📥 JSON Export</a>
       </div>
     </header>
+
+    <!-- Notification Settings Modal -->
+    <div id="notify-modal" class="modal-backdrop">
+      <div class="modal-box">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <h3 style="font-size:1.15rem; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+            <span>🔔</span> Push-Benachrichtigungen
+          </h3>
+          <button onclick="closeNotifyModal()" style="background:none; border:none; color:var(--text-muted); font-size:1.5rem; cursor:pointer;">&times;</button>
+        </div>
+        <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:18px;">
+          Wähle deinen Home Assistant Benachrichtigungsdienst direkt aus der Liste deiner Entitäten:
+        </p>
+        
+        <div style="margin-bottom:16px;">
+          <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
+            Notify-Dienst (Home Assistant Core):
+          </label>
+          <select id="modal-notify-service" style="width:100%; padding:10px 12px; font-size:0.9rem;">
+            <option value="none">Lade Entitäten...</option>
+          </select>
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
+            Mindest-Schweregrad:
+          </label>
+          <select id="modal-notify-severity" style="width:100%; padding:10px 12px; font-size:0.9rem;">
+            <option value="CRITICAL">Nur Kritisch (Aderbruch, AP offline, PoE-Drop)</option>
+            <option value="WARNING">Warnung & Kritisch (inkl. WLAN-Interferenz & Handshake)</option>
+          </select>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <button class="btn btn-secondary" type="button" onclick="testNotification()" id="btn-test-notify">
+            🧪 Test senden
+          </button>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-secondary" type="button" onclick="closeNotifyModal()">Schließen</button>
+            <button class="btn btn-primary" type="button" onclick="saveNotificationSettings()" id="btn-save-notify">
+              💾 Speichern
+            </button>
+          </div>
+        </div>
+        <div id="modal-feedback" style="margin-top:14px; font-size:0.85rem; min-height:20px; text-align:center;"></div>
+      </div>
+    </div>
 
     <!-- Overall Status Banner -->
     <div id="status-banner" class="status-banner ok">
@@ -2014,6 +2184,105 @@ async def dashboard(request: Request):
         alert("Scan fehlgeschlagen: " + err);
       }} finally {{
         btn.innerText = "🔄 Jetzt prüfen";
+        btn.disabled = false;
+      }}
+    }}
+
+    async function openNotifyModal() {{
+      const modal = document.getElementById("notify-modal");
+      modal.style.display = "flex";
+      const sel = document.getElementById("modal-notify-service");
+      const sevSel = document.getElementById("modal-notify-severity");
+      const fb = document.getElementById("modal-feedback");
+      fb.innerHTML = "";
+
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/notify-services`);
+        if (!res.ok) throw new Error("Konnte Dienste nicht laden");
+        const data = await res.json();
+        const services = data.services || ["none"];
+
+        sel.innerHTML = services.map(s => {{
+          let label = s === "none" ? "🚫 Keine Benachrichtigung (Deaktiviert)" : s;
+          if (s.startsWith("notify.mobile_app_")) {{
+            label = "📱 " + s.replace("notify.mobile_app_", "Mobile App: ");
+          }} else if (s === "notify.persistent_notification") {{
+            label = "📌 Home Assistant Benachrichtigung (persistent)";
+          }} else if (s === "notify.notify") {{
+            label = "🔔 Standard Benachrichtigungsdienst (notify.notify)";
+          }}
+          const selected = (s === data.current_service) ? "selected" : "";
+          return `<option value="${{s}}" ${{selected}}>${{label}}</option>`;
+        }}).join("");
+
+        sevSel.value = data.current_min_severity || "CRITICAL";
+      }} catch (err) {{
+        sel.innerHTML = `<option value="none">Fehler beim Laden: ${{err.message}}</option>`;
+      }}
+    }}
+
+    function closeNotifyModal() {{
+      document.getElementById("notify-modal").style.display = "none";
+    }}
+
+    async function saveNotificationSettings() {{
+      const btn = document.getElementById("btn-save-notify");
+      const fb = document.getElementById("modal-feedback");
+      const service = document.getElementById("modal-notify-service").value;
+      const severity = document.getElementById("modal-notify-severity").value;
+
+      btn.innerText = "⏳ Speichern...";
+      btn.disabled = true;
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/settings/notify`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ notify_service: service, notify_min_severity: severity }})
+        }});
+        const data = await res.json();
+        if (data.success) {{
+          fb.innerHTML = `<span style="color:#10b981; font-weight:600;">✓ Gespeichert! Dienst ist aktiv.</span>`;
+          setTimeout(() => {{ closeNotifyModal(); }}, 1200);
+        }} else {{
+          fb.innerHTML = `<span style="color:#ef4444;">Fehler beim Speichern.</span>`;
+        }}
+      }} catch (err) {{
+        fb.innerHTML = `<span style="color:#ef4444;">Fehler: ${{err.message}}</span>`;
+      }} finally {{
+        btn.innerText = "💾 Speichern";
+        btn.disabled = false;
+      }}
+    }}
+
+    async function testNotification() {{
+      const btn = document.getElementById("btn-test-notify");
+      const fb = document.getElementById("modal-feedback");
+      const service = document.getElementById("modal-notify-service").value;
+      const severity = document.getElementById("modal-notify-severity").value;
+
+      if (service === "none") {{
+        fb.innerHTML = `<span style="color:#f59e0b;">Bitte wähle zuerst einen aktiven Dienst aus!</span>`;
+        return;
+      }}
+
+      btn.innerText = "⏳ Sende...";
+      btn.disabled = true;
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/settings/notify/test`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ notify_service: service, notify_min_severity: severity }})
+        }});
+        const data = await res.json();
+        if (data.success) {{
+          fb.innerHTML = `<span style="color:#10b981; font-weight:600;">✓ ${{data.message}}</span>`;
+        }} else {{
+          fb.innerHTML = `<span style="color:#ef4444;">✕ ${{data.message}}</span>`;
+        }}
+      }} catch (err) {{
+        fb.innerHTML = `<span style="color:#ef4444;">✕ Fehler: ${{err.message}}</span>`;
+      }} finally {{
+        btn.innerText = "🧪 Test senden";
         btn.disabled = false;
       }}
     }}

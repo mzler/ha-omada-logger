@@ -2,6 +2,13 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.3.0] - 2026-11-10
+### Hinzugefügt
+- **Dynamische Notify-Entitätsauswahl via Dropdown**: Im Ingress Web-Dashboard gibt es nun einen "🔔 Benachrichtigung"-Button.
+- Das Dropdown lädt automatisch alle in Home Assistant registrierten `notify.*`-Dienste (z. B. `notify.mobile_app_<smartphone>`, `notify.persistent_notification`).
+- Direkter "🧪 Test senden"-Button im Dashboard zur sofortigen Überprüfung der Push-Benachrichtigung.
+- Einstellungen werden direkt übernommen und persistent in `/data/options.json` gespeichert.
+
 ## [1.2.1] - 2026-11-10
 ### Behoben
 - **Automatischer Fallback auf Port 443 (NGINX)**: Bei neueren Omada Controllern (v6.x) schlägt der Login auf Port 8043 mit HTTP 500 fehl, da die NGINX-Reverse-Proxy-Schicht auf Port 443 liegt. Das Add-on erkennt diesen Zustand nun vollautomatisch und switcht nahtlos auf Port 443 um.

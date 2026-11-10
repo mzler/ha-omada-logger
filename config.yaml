@@ -1,6 +1,6 @@
 name: "Omada Diagnostic Advisor"
 slug: "omada_diagnostic_advisor"
-version: "1.2.1"
+version: "1.3.0"
 description: "Intelligente Überwachung von TP-Link Omada Netzwerken: Syslog-Analyse, Link-Drop-Erkennung, SQLite-Historie & HA-Push-Empfehlungen."
 url: "https://github.com/mzler/ha-omada-logger"
 arch:
