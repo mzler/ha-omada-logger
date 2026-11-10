@@ -632,17 +632,36 @@ class OmadaClient:
                         msg = data.get("msg", "Unknown error")
                         logger.error(f"Omada login rejected: errorCode={error_code}, msg={msg}")
                 elif resp.status_code == 500:
-                    # 500 on /api/v2/login (no prefix) almost always means v5+ controller.
-                    # Reset and retry with fresh discovery.
-                    if not self._api_prefix:
+                    # On Omada Controller v6.x, port 8043 returns 500 because the NGINX frontend runs on port 443!
+                    if ":8043" in self.base_url:
+                        fallback_url = f"https://{self.cfg.omada_host}"
                         logger.warning(
-                            "HTTP 500 on v4 login endpoint. Controller may be v5+. "
-                            "Forcing re-discovery of omadacId..."
+                            f"HTTP 500 on port 8043. Omada Controller v6+ requires port 443 (NGINX). "
+                            f"Automatically switching base URL to {fallback_url}..."
                         )
-                        self._controller_version = None
-                        self._api_prefix = ""
-                        self._omadac_id = None
-                        return False  # Will retry after re-discovery on next poll
+                        self.base_url = fallback_url
+                        async with self._build_client() as fallback_client:
+                            fallback_resp = await fallback_client.post(url, json=payload)
+                            if fallback_resp.status_code == 200:
+                                data = fallback_resp.json()
+                                error_code = data.get("errorCode", 0)
+                                if error_code == 0 and "result" in data:
+                                    result = data["result"]
+                                    self.token = result.get("token")
+                                    self.cookies.update(fallback_resp.cookies)
+                                    logger.info(
+                                        f"Successfully authenticated with Omada Controller via port 443 "
+                                        f"(version={self._controller_version}, prefix='{self._api_prefix}')."
+                                    )
+                                    return True
+                                else:
+                                    msg = data.get("msg", "Unknown error")
+                                    logger.error(f"Omada login rejected on port 443: errorCode={error_code}, msg={msg}")
+                                    return False
+                            else:
+                                logger.error(f"Fallback to port 443 failed with HTTP {fallback_resp.status_code}: {fallback_resp.text[:200]}")
+                                return False
+
                     logger.error(f"Omada login failed with HTTP 500: {resp.text[:200]}")
                 else:
                     logger.error(f"Omada login failed with HTTP {resp.status_code}: {resp.text[:200]}")
@@ -1136,7 +1155,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
 

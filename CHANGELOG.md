@@ -2,6 +2,10 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.2.1] - 2026-11-10
+### Behoben
+- **Automatischer Fallback auf Port 443 (NGINX)**: Bei neueren Omada Controllern (v6.x) schlägt der Login auf Port 8043 mit HTTP 500 fehl, da die NGINX-Reverse-Proxy-Schicht auf Port 443 liegt. Das Add-on erkennt diesen Zustand nun vollautomatisch und switcht nahtlos auf Port 443 um.
+
 ## [1.2.0] - 2026-11-10
 ### Behoben
 - **Omada Controller v5+ API-Kompatibilität (HTTP 500 Login-Fix)**: Der API-Client erkennt nun automatisch die Controller-Version via `GET /api/info`, liest die `omadacId` aus und stellt alle Requests korrekt mit dem nötigen URL-Präfix `/{omadacId}/api/v2/...` (v5+) bzw. ohne Präfix `/api/v2/...` (v4) aus.
