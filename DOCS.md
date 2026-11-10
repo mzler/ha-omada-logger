@@ -84,6 +84,21 @@ CREATE TABLE metric_history (
 );
 ```
 
+### Tabelle `syslog_messages`:
+```sql
+CREATE TABLE syslog_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    source_ip TEXT,
+    device_name TEXT,
+    device_mac TEXT,
+    log_type TEXT DEFAULT 'GENERAL',
+    log_level TEXT DEFAULT 'INFO',
+    message TEXT
+);
+```
+*Hinweis*: Alte Einträge werden automatisch nach Ablauf von `log_retention_days` (Standard: 7 Tage) zyklisch aus dieser Tabelle entfernt.
+
 ---
 
 ## Home Assistant Ingress Dashboard

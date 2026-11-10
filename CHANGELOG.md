@@ -2,6 +2,25 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.4.0] - 2026-11-10
+### Hinzugefügt
+- **Persistente Syslog-Speicherung & Retention-Policy**:
+  - Alle über Port 5514 empfangenen Syslog-Meldungen werden ab sofort persistent in SQLite in der Tabelle `syslog_messages` gespeichert.
+  - Konfigurierbare Speicherdauer in Tagen (`log_retention_days`, Standard: 7 Tage). Ältere Logs werden automatisch alle 6 Stunden und beim Start bereinigt.
+- **Kritische vs. Herkömmliche Push-Benachrichtigung**:
+  - Im Einstellungsdialog kann nun zwischen **🚨 Kritischer Push-Alarm** (durchbricht iOS & Android 'Nicht Stören'/Stummschaltung) und **🔔 Herkömmlicher Push** (Standard-Benachrichtigung) gewählt werden.
+  - Automatische Konfiguration von `interruption-level: critical`, `sound.critical: 1` für iOS und `channel: alarm_stream`, `priority: high` für Android.
+- **Feingranularer Syslog-Viewer (Neuer Dashboard-Tab "📜 Syslog-Protokoll")**:
+  - Tab-Navigation im Dashboard zwischen "🛡️ Diagnose & Vorfälle" und "📜 Syslog-Protokoll".
+  - Volltext-Suche in Meldungstext und Quell-IP.
+  - Filter nach Protokoll-Typ (WLAN & Roaming, Port & Link-Drop, PoE, System & Reboot, DHCP, Allgemein).
+  - Filter nach Schweregrad (CRITICAL, ERROR, WARN, INFO).
+  - Dynamisches Dropdown für alle meldenden Netzwerkgeräte.
+  - Zeitfenster-Filter (Letzte Stunde, Letzte 24h, Letzte 7 Tage oder benutzerdefinierter Datumsbereich von/bis).
+  - Zeilenbegrenzung (50, 100, 250, 500 Zeilen).
+  - Ein-Klick-Kopierbutton für jede Nachricht in die Zwischenablage.
+  - Eigener CSV- und JSON-Export für alle gefilterten Syslog-Logs.
+
 ## [1.3.0] - 2026-11-10
 ### Hinzugefügt
 - **Dynamische Notify-Entitätsauswahl via Dropdown**: Im Ingress Web-Dashboard gibt es nun einen "🔔 Benachrichtigung"-Button.

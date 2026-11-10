@@ -22,13 +22,19 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
   3. **WPA 4-Way Handshake Dropouts**: Filtert Disconnects mit `reason: 15` heraus und weist auf WPA3/PMF-Inkompatibilitäten hin.
   4. **2.4-GHz-Kanalüberlastung**: Alarmiert bei Kanal-Auslastung `> 80%` mit Optimierungshinweisen für Kanal- und Sendeleistung.
 - **Home Assistant Ingress Dark-Mode Dashboard**:
-  - Übersichtlicher Gesundheitsstatus (Optimal / Warnung / Kritisch).
-  - Live-Tabelle der letzten 50 Vorfälle mit Schnellfilterung nach Gerät und Schweregrad.
-  - Trend-Analyse (Häufung nach Uhrzeit und am stärksten betroffenen Geräten).
-  - Direkte Aktions-Buttons: *"Als behoben markieren"*, *"Alle beheben"*, *"CSV/JSON Export"* und manueller Scan-Trigger.
+  - **Tab 1: Diagnose & Vorfälle**:
+    - Übersichtlicher Gesundheitsstatus (Optimal / Warnung / Kritisch).
+    - Live-Tabelle der aktiven und behobenen Vorfälle mit Filterung nach Gerät und Schweregrad.
+    - Trend-Analyse (Häufung nach Uhrzeit und am stärksten betroffenen Geräten).
+    - Direkte Aktions-Buttons: *"Als behoben markieren"*, *"Alle beheben"*, *"CSV/JSON Export"* und manueller Scan-Trigger.
+  - **Tab 2: Syslog-Protokoll (Alle Logs)**:
+    - Vollständige Historie aller empfangenen Syslog-Meldungen, persistent gespeichert für $X$ Tage (`log_retention_days`).
+    - Feingranulare Filterung nach Volltextsuche, Protokoll-Typ (WIFI, PORT_LINK, POE, SYSTEM, DHCP), Level (CRITICAL, ERROR, WARN, INFO), Gerät / IP und Zeitfenster (1h, 24h, 7 Tage oder benutzerdefinierter Zeitraum).
+    - Schneller Kopier-Button für jede Log-Zeile sowie separater CSV- und JSON-Export.
 - **Home Assistant Core Integration**:
   - Automatische Aktualisierung von `sensor.omada_advisor_status` und `sensor.omada_advisor_recommendation`.
-  - Priorisierte Mobile-Push-Benachrichtigungen via konfigurierbarem HA-Dienst (z. B. `notify.mobile_app_dein_smartphone`).
+  - Dynamische Dropdown-Auswahl der Notify-Entität (`notify.*`) direkt im Web-UI.
+  - Konfigurierbarer Push-Typ: **Kritische Push-Nachricht** (durchbricht 'Nicht Stören'/Stummschaltung via iOS `interruption-level: critical` / Android `alarm_stream`) oder **Herkömmliche Push**.
 
 ---
 
@@ -101,6 +107,8 @@ verify_ssl: false
 poll_interval_seconds: 60
 notify_service: "notify.mobile_app_dein_smartphone"
 notify_min_severity: "CRITICAL"
+notify_push_type: "critical"
+log_retention_days: 7
 ```
 
 | Parameter | Typ | Standard | Beschreibung |
@@ -115,6 +123,8 @@ notify_min_severity: "CRITICAL"
 | `syslog_port` | port | `5514` | Interner UDP-Syslog-Port des Add-ons (z. B. 5514 oder 5515). |
 | `notify_service` | string | `none` | Name des HA Notification-Dienstes (z. B. `notify.mobile_app_pixel`). |
 | `notify_min_severity` | string | `CRITICAL` | Mindestschweregrad für Benachrichtigungen (`CRITICAL` oder `WARNING`). |
+| `notify_push_type` | list | `critical` | Art der Push-Nachricht: `critical` (durchbricht 'Nicht Stören') oder `standard`. |
+| `log_retention_days` | integer | `7` | Anzahl Tage zur persistenten Speicherung aller empfangenen Syslog-Nachrichten in SQLite. |
 
 ---
 

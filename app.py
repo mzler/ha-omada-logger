@@ -62,6 +62,8 @@ class AppConfig(BaseModel):
     syslog_port: int = 5514
     notify_service: str = "none"
     notify_min_severity: str = "CRITICAL"  # "CRITICAL" or "WARNING"
+    notify_push_type: str = "critical"  # "critical" or "standard"
+    log_retention_days: int = 7
     db_path: str = str(DB_DEFAULT_PATH)
 
     @classmethod
@@ -87,6 +89,8 @@ class AppConfig(BaseModel):
             "syslog_port": int(os.getenv("SYSLOG_PORT")) if os.getenv("SYSLOG_PORT") else None,
             "notify_service": os.getenv("NOTIFY_SERVICE"),
             "notify_min_severity": os.getenv("NOTIFY_MIN_SEVERITY"),
+            "notify_push_type": os.getenv("NOTIFY_PUSH_TYPE"),
+            "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS")) if os.getenv("LOG_RETENTION_DAYS") else None,
             "db_path": os.getenv("DB_PATH"),
         }
         for k, v in env_map.items():
@@ -111,6 +115,38 @@ class AppConfig(BaseModel):
 
 
 config = AppConfig.load()
+
+# ---------------------------------------------------------------------------
+# Syslog Classification Helper
+# ---------------------------------------------------------------------------
+def classify_syslog(message: str) -> Tuple[str, str]:
+    """Classifies syslog message into (log_type, log_level)"""
+    m = message.lower()
+
+    # Determine Severity / Level
+    if any(k in m for k in ("crit", "fatal", "emergency", "alert", "timeout isolated", "inform timeout", "overload")):
+        level = "CRITICAL"
+    elif any(k in m for k in ("err", "fail", "drop", "reject", "denied")):
+        level = "ERROR"
+    elif any(k in m for k in ("warn", "degrad", "interfer", "reason: 15", "retry", "loss")):
+        level = "WARN"
+    else:
+        level = "INFO"
+
+    # Determine Category / Type
+    if any(k in m for k in ("wifi", "wlan", "ssid", "handshake", "eapol", "assoc", "disassoc", "roam", "wpa", "client", "radio", "channel")):
+        log_type = "WIFI"
+    elif any(k in m for k in ("inform", "isolated", "adopt", "upgrade", "reboot", "heartbeat", "controller", "management", "login", "auth")):
+        log_type = "SYSTEM"
+    elif any(k in m for k in ("port", "link", "speed", "poe", "gigabit", "duplex", "switch", "sfp", "vlan", "cable")):
+        log_type = "PORT_LINK"
+    elif any(k in m for k in ("dhcp", "lease", "dns", "gateway", "ip", "subnet", "arp")):
+        log_type = "DHCP"
+    else:
+        log_type = "GENERAL"
+
+    return log_type, level
+
 
 # ---------------------------------------------------------------------------
 # Database Management
@@ -164,8 +200,146 @@ class DatabaseManager:
                 )
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metric_history(timestamp);")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_metrics_dev ON metric_history(device_name);")
+
+                # Table: syslog_messages (All incoming raw logs with type & level)
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS syslog_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        source_ip TEXT,
+                        device_name TEXT,
+                        device_mac TEXT,
+                        log_type TEXT DEFAULT 'GENERAL',
+                        log_level TEXT DEFAULT 'INFO',
+                        message TEXT
+                    );
+                    """
+                )
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_syslog_ts ON syslog_messages(timestamp);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_syslog_type ON syslog_messages(log_type);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_syslog_level ON syslog_messages(log_level);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_syslog_ip ON syslog_messages(source_ip);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_syslog_dev ON syslog_messages(device_name);")
+
+                # Auto-migration if columns are missing
+                try:
+                    await db.execute("ALTER TABLE syslog_messages ADD COLUMN log_type TEXT DEFAULT 'GENERAL';")
+                except Exception:
+                    pass
+                try:
+                    await db.execute("ALTER TABLE syslog_messages ADD COLUMN log_level TEXT DEFAULT 'INFO';")
+                except Exception:
+                    pass
+
                 await db.commit()
                 logger.info(f"Database initialized at {self.db_path}")
+
+    async def record_syslog(
+        self,
+        source_ip: str,
+        device_name: str,
+        device_mac: str,
+        message: str,
+        log_type: Optional[str] = None,
+        log_level: Optional[str] = None,
+    ) -> None:
+        """Store raw incoming syslog message in SQLite with classification"""
+        if not log_type or not log_level:
+            c_type, c_level = classify_syslog(message)
+            log_type = log_type or c_type
+            log_level = log_level or c_level
+
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO syslog_messages (source_ip, device_name, device_mac, log_type, log_level, message)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (source_ip, device_name, device_mac, log_type, log_level, message),
+                )
+                await db.commit()
+
+    async def get_syslogs(
+        self,
+        limit: int = 100,
+        search: Optional[str] = None,
+        source_ip: Optional[str] = None,
+        device: Optional[str] = None,
+        log_type: Optional[str] = None,
+        log_level: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch latest raw syslog messages with fine-grained filtering"""
+        query = "SELECT * FROM syslog_messages WHERE 1=1"
+        params: List[Any] = []
+
+        if search:
+            query += " AND (message LIKE ? OR device_name LIKE ? OR device_mac LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        if source_ip:
+            query += " AND source_ip = ?"
+            params.append(source_ip)
+        if device:
+            query += " AND (device_name LIKE ? OR device_mac LIKE ?)"
+            params.extend([f"%{device}%", f"%{device}%"])
+        if log_type and log_type.upper() != "ALL":
+            query += " AND log_type = ?"
+            params.append(log_type.upper())
+        if log_level and log_level.upper() != "ALL":
+            query += " AND log_level = ?"
+            params.append(log_level.upper())
+        if date_from:
+            query += " AND timestamp >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND timestamp <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def get_syslog_devices(self) -> List[str]:
+        """Get distinct device names or IPs for filter dropdown"""
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT DISTINCT device_name FROM syslog_messages WHERE device_name IS NOT NULL ORDER BY device_name"
+                )
+                rows = await cursor.fetchall()
+                return [r[0] for r in rows if r[0]]
+
+    async def cleanup_old_logs(self, retention_days: int) -> Dict[str, int]:
+        """Delete syslog messages and metrics older than retention_days"""
+        cutoff_days = max(1, retention_days)
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                c1 = await db.execute(
+                    "DELETE FROM syslog_messages WHERE timestamp < datetime('now', ?)",
+                    (f"-{cutoff_days} days",),
+                )
+                syslog_deleted = c1.rowcount
+
+                c2 = await db.execute(
+                    "DELETE FROM metric_history WHERE timestamp < datetime('now', ?)",
+                    (f"-{cutoff_days} days",),
+                )
+                metrics_deleted = c2.rowcount
+
+                await db.commit()
+                return {
+                    "syslog_deleted": syslog_deleted,
+                    "metrics_deleted": metrics_deleted,
+                }
 
     async def record_incident(
         self,
@@ -436,24 +610,45 @@ class HomeAssistantClient:
             logger.info(f"[HA-SIM NOTIFY] Target: {service_target} | Title: {title} | Message: {message}")
             return True
 
+        is_critical = (self.cfg.notify_push_type.lower() == "critical")
+
+        # Push payload supporting iOS and Android critical alerts vs standard push
+        data_payload: Dict[str, Any] = {
+            "tag": "omada-advisor",
+            "actions": [
+                {
+                    "action": "open_advisor",
+                    "title": "Advisor öffnen",
+                }
+            ],
+        }
+
+        if is_critical:
+            # Critical Alert: overrides mute & Do Not Disturb on iOS and Android
+            data_payload["priority"] = "high"
+            data_payload["ttl"] = 0
+            data_payload["channel"] = "alarm_stream"
+            data_payload["push"] = {
+                "sound": {
+                    "name": "default",
+                    "critical": 1,
+                    "volume": 1.0,
+                },
+                "interruption-level": "critical",
+            }
+        else:
+            # Standard push: standard sound, respects Do Not Disturb
+            data_payload["priority"] = "normal"
+            data_payload["push"] = {
+                "sound": "default",
+                "interruption-level": "active",
+            }
+
         url = f"{self.base_url}/services/notify/{service_target}"
         payload = {
             "title": title,
             "message": message,
-            "data": {
-                "priority": "high",
-                "tag": "omada-advisor",
-                "push": {
-                    "sound": "default",
-                    "interruption-level": "critical" if severity == "CRITICAL" else "time-sensitive",
-                },
-                "actions": [
-                    {
-                        "action": "open_advisor",
-                        "title": "Advisor öffnen",
-                    }
-                ],
-            },
+            "data": data_payload,
         }
 
         try:
@@ -1033,11 +1228,22 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
         asyncio.create_task(self.handle_syslog_message(source_ip, raw_text))
 
     async def handle_syslog_message(self, source_ip: str, message: str) -> None:
-        """Parse raw syslog line and trigger heuristics"""
+        """Parse raw syslog line, store in SQLite, and trigger heuristics"""
         # Extract potential MAC address or device identifier
         mac_match = MAC_ADDRESS_RE.search(message)
         device_mac = mac_match.group(0).upper().replace("-", ":") if mac_match else f"IP-{source_ip}"
         device_name = f"Omada-Device ({source_ip})"
+
+        # Persist ALL received syslog events into SQLite
+        try:
+            await db_mgr.record_syslog(
+                source_ip=source_ip,
+                device_name=device_name,
+                device_mac=device_mac,
+                message=message,
+            )
+        except Exception as e:
+            logger.error(f"Error persisting syslog message: {e}")
 
         # Heuristic 2: Inform Timeout
         if INFORM_TIMEOUT_RE.search(message):
@@ -1144,6 +1350,28 @@ async def omada_polling_loop():
         await asyncio.sleep(max(10, config.poll_interval_seconds))
 
 
+async def retention_cleanup_loop():
+    """Periodic worker that purges logs and metrics older than log_retention_days"""
+    # Initial cleanup at startup
+    try:
+        days = max(1, config.log_retention_days)
+        deleted = await db_mgr.cleanup_old_logs(days)
+        if sum(deleted.values()) > 0:
+            logger.info(f"Startup retention cleanup (older than {days} days): purged {deleted}")
+    except Exception as e:
+        logger.warning(f"Initial retention cleanup error: {e}")
+
+    while True:
+        await asyncio.sleep(6 * 3600)  # Every 6 hours
+        try:
+            days = max(1, config.log_retention_days)
+            deleted = await db_mgr.cleanup_old_logs(days)
+            if sum(deleted.values()) > 0:
+                logger.info(f"Retention cleanup (older than {days} days): purged {deleted}")
+        except Exception as e:
+            logger.error(f"Error in retention cleanup loop: {e}")
+
+
 # ---------------------------------------------------------------------------
 # FastAPI Web Application & Ingress Dashboard
 # ---------------------------------------------------------------------------
@@ -1168,7 +1396,8 @@ async def lifespan(app: FastAPI):
             "Omada Controller REST-API Poller and Web Dashboard remain fully operational."
         )
 
-    # Start background polling loop
+    # Start background tasks
+    cleanup_task = asyncio.create_task(retention_cleanup_loop())
     poller_task = asyncio.create_task(omada_polling_loop())
 
     # Initial sensor status sync
@@ -1178,6 +1407,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Teardown
+    cleanup_task.cancel()
     poller_task.cancel()
     if transport:
         transport.close()
@@ -1321,6 +1551,8 @@ async def health():
 class NotifySettingsPayload(BaseModel):
     notify_service: str
     notify_min_severity: str = "CRITICAL"
+    notify_push_type: str = "critical"  # "critical" or "standard"
+    log_retention_days: Optional[int] = None
 
 
 @app.get("/api/notify-services")
@@ -1330,6 +1562,8 @@ async def api_get_notify_services():
         "services": services,
         "current_service": config.notify_service,
         "current_min_severity": config.notify_min_severity,
+        "current_push_type": config.notify_push_type,
+        "current_retention_days": config.log_retention_days,
     }
 
 
@@ -1337,6 +1571,10 @@ async def api_get_notify_services():
 async def api_save_notify_settings(payload: NotifySettingsPayload):
     config.notify_service = payload.notify_service.strip()
     config.notify_min_severity = payload.notify_min_severity.strip().upper()
+    if payload.notify_push_type:
+        config.notify_push_type = payload.notify_push_type.strip().lower()
+    if payload.log_retention_days is not None:
+        config.log_retention_days = max(1, payload.log_retention_days)
 
     # Persist to /data/options.json
     try:
@@ -1346,11 +1584,19 @@ async def api_save_notify_settings(payload: NotifySettingsPayload):
                 options = json.load(f)
         options["notify_service"] = config.notify_service
         options["notify_min_severity"] = config.notify_min_severity
+        options["notify_push_type"] = config.notify_push_type
+        options["log_retention_days"] = config.log_retention_days
         with open(OPTIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(options, f, indent=2)
-        logger.info(f"Saved notify configuration: {config.notify_service} [{config.notify_min_severity}]")
+        logger.info(
+            f"Saved settings: notify={config.notify_service} [{config.notify_min_severity}], "
+            f"push_type={config.notify_push_type}, retention={config.log_retention_days}d"
+        )
     except Exception as e:
         logger.warning(f"Could not persist options to {OPTIONS_FILE}: {e}")
+
+    # Immediately trigger a retention cleanup with the new days
+    await db_mgr.cleanup_old_logs(config.log_retention_days)
 
     # Sync sensors
     stats = await db_mgr.get_stats()
@@ -1360,6 +1606,8 @@ async def api_save_notify_settings(payload: NotifySettingsPayload):
         "success": True,
         "notify_service": config.notify_service,
         "notify_min_severity": config.notify_min_severity,
+        "notify_push_type": config.notify_push_type,
+        "log_retention_days": config.log_retention_days,
     }
 
 
@@ -1370,21 +1618,107 @@ async def api_test_notify_settings(payload: NotifySettingsPayload):
         return {"success": False, "message": "Kein Benachrichtigungs-Dienst ausgewählt."}
 
     old_service = config.notify_service
+    old_push_type = config.notify_push_type
     config.notify_service = target
+    config.notify_push_type = payload.notify_push_type.strip().lower()
     try:
+        push_label = "Kritische Push" if config.notify_push_type == "critical" else "Standard-Push"
         success = await ha_client.send_notification(
-            title="🔔 Omada Diagnostic Advisor Test",
-            message=f"Test-Benachrichtigung erfolgreich empfangen! (Dienst: {target})",
+            title=f"🔔 Omada Advisor Test ({push_label})",
+            message=f"Test-Benachrichtigung erfolgreich empfangen! (Typ: {push_label}, Dienst: {target})",
             severity="CRITICAL",  # bypass min_severity for test
             action="Advisor Test",
         )
     finally:
         config.notify_service = old_service
+        config.notify_push_type = old_push_type
 
     if success:
-        return {"success": True, "message": f"Test-Benachrichtigung an '{target}' erfolgreich gesendet!"}
+        return {"success": True, "message": f"Test-Benachrichtigung ({push_label}) an '{target}' gesendet!"}
     else:
         return {"success": False, "message": f"Fehler beim Senden an '{target}'. Existiert der Dienst in Home Assistant?"}
+
+
+@app.get("/api/syslogs")
+async def api_get_syslogs(
+    limit: int = Query(100, ge=1, le=1000),
+    search: Optional[str] = Query(None),
+    source_ip: Optional[str] = Query(None),
+    device: Optional[str] = Query(None),
+    log_type: Optional[str] = Query(None),
+    log_level: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    logs = await db_mgr.get_syslogs(
+        limit=limit,
+        search=search,
+        source_ip=source_ip,
+        device=device,
+        log_type=log_type,
+        log_level=log_level,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return {
+        "logs": logs,
+        "count": len(logs),
+        "retention_days": config.log_retention_days,
+    }
+
+
+@app.get("/api/syslogs/devices")
+async def api_get_syslog_devices():
+    devices = await db_mgr.get_syslog_devices()
+    return {"devices": devices}
+
+
+@app.get("/api/syslogs/export")
+async def api_export_syslogs(
+    format: str = Query("json", pattern="^(json|csv)$"),
+    search: Optional[str] = Query(None),
+    source_ip: Optional[str] = Query(None),
+    device: Optional[str] = Query(None),
+    log_type: Optional[str] = Query(None),
+    log_level: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    logs = await db_mgr.get_syslogs(
+        limit=5000,
+        search=search,
+        source_ip=source_ip,
+        device=device,
+        log_type=log_type,
+        log_level=log_level,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    if format == "json":
+        return JSONResponse(
+            content=logs,
+            headers={"Content-Disposition": 'attachment; filename="omada_syslogs.json"'},
+        )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Timestamp", "Type", "Level", "Source IP", "Device Name", "Device MAC", "Message"])
+    for l in logs:
+        writer.writerow([
+            l.get("id"),
+            l.get("timestamp"),
+            l.get("log_type", "GENERAL"),
+            l.get("log_level", "INFO"),
+            l.get("source_ip"),
+            l.get("device_name"),
+            l.get("device_mac"),
+            l.get("message"),
+        ])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="omada_syslogs.csv"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1806,6 +2140,29 @@ async def dashboard(request: Request):
       width: 90%;
       box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
     }}
+
+    .copy-btn {{
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }}
+    .copy-btn:hover {{
+      background: var(--card-border);
+      color: #f8fafc;
+    }}
+    .badge-gray {{
+      background: #334155;
+      color: #94a3b8;
+      border: 1px solid #475569;
+    }}
   </style>
 </head>
 <body>
@@ -1827,20 +2184,20 @@ async def dashboard(request: Request):
       </div>
     </header>
 
-    <!-- Notification Settings Modal -->
+    <!-- Notification & Retention Settings Modal -->
     <div id="notify-modal" class="modal-backdrop">
       <div class="modal-box">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
           <h3 style="font-size:1.15rem; color:#f8fafc; display:flex; align-items:center; gap:8px;">
-            <span>🔔</span> Push-Benachrichtigungen
+            <span>⚙️</span> Benachrichtigung & Aufbewahrung
           </h3>
           <button onclick="closeNotifyModal()" style="background:none; border:none; color:var(--text-muted); font-size:1.5rem; cursor:pointer;">&times;</button>
         </div>
         <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:18px;">
-          Wähle deinen Home Assistant Benachrichtigungsdienst direkt aus der Liste deiner Entitäten:
+          Konfiguriere den Home Assistant Alarmdienst, die Alarmierungsart und die Syslog-Speicherdauer:
         </p>
         
-        <div style="margin-bottom:16px;">
+        <div style="margin-bottom:14px;">
           <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
             Notify-Dienst (Home Assistant Core):
           </label>
@@ -1849,14 +2206,37 @@ async def dashboard(request: Request):
           </select>
         </div>
 
-        <div style="margin-bottom:20px;">
+        <div style="margin-bottom:14px;">
           <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
-            Mindest-Schweregrad:
+            Push-Typ (Alarmierungsart):
+          </label>
+          <select id="modal-notify-push-type" style="width:100%; padding:10px 12px; font-size:0.9rem;">
+            <option value="critical">🚨 Kritische Push (durchbricht Stummschaltung & 'Nicht Stören')</option>
+            <option value="standard">🔔 Herkömmliche Push (Standard-Lautstärke, respektiert Stummschaltung)</option>
+          </select>
+          <span style="font-size:0.75rem; color:var(--text-muted); margin-top:4px; display:block;">
+            Kritische Push alarmiert auf iOS und Android auch im Stumm- / Nicht-Stören-Modus bei Notfällen.
+          </span>
+        </div>
+
+        <div style="margin-bottom:14px;">
+          <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
+            Mindest-Schweregrad für Alarm:
           </label>
           <select id="modal-notify-severity" style="width:100%; padding:10px 12px; font-size:0.9rem;">
             <option value="CRITICAL">Nur Kritisch (Aderbruch, AP offline, PoE-Drop)</option>
             <option value="WARNING">Warnung & Kritisch (inkl. WLAN-Interferenz & Handshake)</option>
           </select>
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
+            Syslog-Aufbewahrungsdauer:
+          </label>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <input type="number" id="modal-retention-days" min="1" max="365" style="width:100px; padding:8px 12px; font-size:0.9rem;" value="7" />
+            <span style="font-size:0.85rem; color:var(--text-muted);">Tage (ältere Logs werden automatisch gelöscht)</span>
+          </div>
         </div>
 
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
@@ -1874,6 +2254,14 @@ async def dashboard(request: Request):
       </div>
     </div>
 
+    <!-- Tabs Navigation -->
+    <div style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px;">
+      <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose & Vorfälle</button>
+      <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslog-Protokoll (Alle Logs)</button>
+    </div>
+
+    <!-- TAB 1: Advisor View -->
+    <div id="view-advisor">
     <!-- Overall Status Banner -->
     <div id="status-banner" class="status-banner ok">
       <span class="pulse" style="background:#10b981;"></span>
@@ -1976,6 +2364,104 @@ async def dashboard(request: Request):
       </table>
     </div>
   </div>
+
+    <!-- TAB 2: Syslog View -->
+    <div id="view-syslogs" style="display:none;">
+      <!-- Syslog Filter Toolbar -->
+      <div class="card" style="margin-bottom:20px; padding:16px;">
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
+          <!-- Filter Inputs -->
+          <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+            <!-- Fulltext search -->
+            <input type="text" id="syslog-search" placeholder="🔍 Suche in Nachricht / IP..." 
+                   style="min-width:200px; flex:1;" oninput="debounce(loadSyslogs, 350)()" />
+
+            <!-- Log Type Dropdown -->
+            <select id="syslog-type" onchange="loadSyslogs()">
+              <option value="">Alle Protokoll-Typen</option>
+              <option value="WIFI">WLAN &amp; Roaming (WIFI)</option>
+              <option value="PORT_LINK">Port &amp; Link-Drop (PORT_LINK)</option>
+              <option value="POE">PoE Stromversorgung (POE)</option>
+              <option value="SYSTEM">System &amp; Reboot (SYSTEM)</option>
+              <option value="DHCP">DHCP &amp; IP (DHCP)</option>
+              <option value="GENERAL">Allgemein (GENERAL)</option>
+            </select>
+
+            <!-- Log Level Dropdown -->
+            <select id="syslog-level" onchange="loadSyslogs()">
+              <option value="">Alle Level</option>
+              <option value="CRITICAL">CRITICAL</option>
+              <option value="ERROR">ERROR</option>
+              <option value="WARN">WARN</option>
+              <option value="INFO">INFO</option>
+            </select>
+
+            <!-- Device Dropdown -->
+            <select id="syslog-device" onchange="loadSyslogs()" style="max-width:200px;">
+              <option value="">Alle Geräte</option>
+            </select>
+
+            <!-- Timeframe Dropdown -->
+            <select id="syslog-timeframe" onchange="onTimeframeChange()">
+              <option value="">Alle Zeiträume</option>
+              <option value="1h">Letzte 1 Stunde</option>
+              <option value="24h">Letzte 24 Stunden</option>
+              <option value="7d" selected>Letzte 7 Tage</option>
+              <option value="custom">Benutzerdefiniert...</option>
+            </select>
+
+            <!-- Custom date range -->
+            <div id="syslog-custom-dates" style="display:none; gap:6px; align-items:center;">
+              <input type="datetime-local" id="syslog-date-from" title="Von Datum" onchange="loadSyslogs()" />
+              <span style="color:var(--text-muted); font-size:0.8rem;">bis</span>
+              <input type="datetime-local" id="syslog-date-to" title="Bis Datum" onchange="loadSyslogs()" />
+            </div>
+
+            <!-- Limit -->
+            <select id="syslog-limit" onchange="loadSyslogs()">
+              <option value="50">50 Zeilen</option>
+              <option value="100" selected>100 Zeilen</option>
+              <option value="250">250 Zeilen</option>
+              <option value="500">500 Zeilen</option>
+            </select>
+          </div>
+
+          <!-- Actions -->
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn btn-secondary" type="button" onclick="resetSyslogFilters()" title="Filter zurücksetzen">↺ Reset</button>
+            <button class="btn btn-secondary" type="button" onclick="exportSyslogs('csv')" title="Gefilterte Logs als CSV exportieren">📊 CSV</button>
+            <button class="btn btn-secondary" type="button" onclick="exportSyslogs('json')" title="Gefilterte Logs als JSON exportieren">📥 JSON</button>
+          </div>
+        </div>
+
+        <!-- Info line -->
+        <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:var(--text-muted); border-top:1px solid rgba(51,65,85,0.4); padding-top:8px;">
+          <div id="syslog-info-count">Lade Syslogs...</div>
+          <div>Speicherdauer: <strong id="syslog-retention-info">{config.log_retention_days} Tage</strong> (automatische Bereinigung)</div>
+        </div>
+      </div>
+
+      <!-- Syslog Table -->
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:160px;">Zeitstempel</th>
+              <th style="width:115px;">Typ</th>
+              <th style="width:90px;">Level</th>
+              <th style="width:190px;">Gerät / Quell-IP</th>
+              <th>Syslog Meldung</th>
+              <th style="width:95px; text-align:center;">Aktion</th>
+            </tr>
+          </thead>
+          <tbody id="syslogs-tbody">
+            <tr>
+              <td colspan="6" style="text-align:center; padding:32px; color:var(--text-muted);">Lade Protokolle...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
 
   <script>
     const ROOT_PATH = "{root_path}";
@@ -2188,11 +2674,211 @@ async def dashboard(request: Request):
       }}
     }}
 
+    function switchTab(tab) {{
+      const isAdvisor = tab === 'advisor';
+      document.getElementById('view-advisor').style.display = isAdvisor ? 'block' : 'none';
+      document.getElementById('view-syslogs').style.display = isAdvisor ? 'none' : 'block';
+      document.getElementById('tab-btn-advisor').className = isAdvisor ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tab-btn-syslogs').className = isAdvisor ? 'btn btn-secondary' : 'btn btn-primary';
+
+      if (!isAdvisor) {{
+        loadSyslogDevices();
+        loadSyslogs();
+      }}
+    }}
+
+    function onTimeframeChange() {{
+      const tf = document.getElementById("syslog-timeframe").value;
+      const customDiv = document.getElementById("syslog-custom-dates");
+      const fromInput = document.getElementById("syslog-date-from");
+      const toInput = document.getElementById("syslog-date-to");
+
+      if (tf === "custom") {{
+        customDiv.style.display = "flex";
+      }} else {{
+        customDiv.style.display = "none";
+        toInput.value = "";
+        if (tf === "1h") {{
+          const d = new Date(Date.now() - 3600 * 1000);
+          fromInput.value = d.toISOString().slice(0, 16);
+        }} else if (tf === "24h") {{
+          const d = new Date(Date.now() - 24 * 3600 * 1000);
+          fromInput.value = d.toISOString().slice(0, 16);
+        }} else if (tf === "7d") {{
+          const d = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+          fromInput.value = d.toISOString().slice(0, 16);
+        }} else {{
+          fromInput.value = "";
+        }}
+      }}
+      loadSyslogs();
+    }}
+
+    async function loadSyslogDevices() {{
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/syslogs/devices`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const sel = document.getElementById("syslog-device");
+        const currentVal = sel.value;
+        const devices = data.devices || [];
+
+        let html = '<option value="">Alle Geräte</option>';
+        devices.forEach(d => {{
+          const label = d.device_name ? `${{d.device_name}} (${{d.source_ip}})` : d.source_ip;
+          const val = d.device_name || d.source_ip;
+          const selAttr = (val === currentVal) ? "selected" : "";
+          html += `<option value="${{val}}" ${{selAttr}}>${{label}}</option>`;
+        }});
+        sel.innerHTML = html;
+      }} catch (err) {{
+        console.error("Failed to load devices for filter:", err);
+      }}
+    }}
+
+    async function loadSyslogs() {{
+      const search = document.getElementById("syslog-search").value.trim();
+      const logType = document.getElementById("syslog-type").value;
+      const logLevel = document.getElementById("syslog-level").value;
+      const device = document.getElementById("syslog-device").value;
+      const dateFrom = document.getElementById("syslog-date-from").value;
+      const dateTo = document.getElementById("syslog-date-to").value;
+      const limit = document.getElementById("syslog-limit").value;
+
+      const params = new URLSearchParams();
+      params.set("limit", limit || "100");
+      if (search) params.set("search", search);
+      if (logType) params.set("log_type", logType);
+      if (logLevel) params.set("log_level", logLevel);
+      if (device) params.set("device", device);
+      if (dateFrom) params.set("date_from", dateFrom.replace("T", " "));
+      if (dateTo) params.set("date_to", dateTo.replace("T", " "));
+
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/syslogs?${{params.toString()}}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const logs = data.logs || [];
+        const tbody = document.getElementById("syslogs-tbody");
+        const infoCount = document.getElementById("syslog-info-count");
+        if (data.retention_days) {{
+          const retEl = document.getElementById("syslog-retention-info");
+          if (retEl) retEl.innerText = `${{data.retention_days}} Tage`;
+        }}
+
+        infoCount.innerText = `Gefiltert: ${{logs.length}} Log-Einträge angezeigt`;
+
+        if (logs.length === 0) {{
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-muted);">Keine Syslog-Nachrichten für diese Filtereinstellungen gefunden.</td></tr>`;
+          return;
+        }}
+
+        tbody.innerHTML = logs.map(l => {{
+          let levelBadge = "badge-gray";
+          if (l.log_level === "CRITICAL" || l.log_level === "ERROR") levelBadge = "badge-crit";
+          else if (l.log_level === "WARN" || l.log_level === "WARNING") levelBadge = "badge-warn";
+          else if (l.log_level === "INFO") levelBadge = "badge-info";
+
+          const devLabel = l.device_name 
+            ? `<strong>${{escapeHtml(l.device_name)}}</strong><br/><span style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</span>`
+            : `<span style="font-family:monospace;">${{escapeHtml(l.source_ip || 'Unbekannt')}}</span>`;
+
+          const escapedMsg = escapeHtml(l.message || '');
+          const rawForAttr = encodeURIComponent(l.message || '');
+
+          return `
+            <tr>
+              <td style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem; font-family:monospace;">
+                ${{l.timestamp || ''}}
+              </td>
+              <td>
+                <span class="badge badge-cat">${{l.log_type || 'GENERAL'}}</span>
+              </td>
+              <td>
+                <span class="badge ${{levelBadge}}">${{l.log_level || 'INFO'}}</span>
+              </td>
+              <td>
+                ${{devLabel}}
+              </td>
+              <td style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-all; max-width:550px;">
+                ${{escapedMsg}}
+              </td>
+              <td style="text-align:center;">
+                <button class="copy-btn" onclick="copyLogEncoded(this, '${{rawForAttr}}')" title="In Zwischenablage kopieren">📋 Kopieren</button>
+              </td>
+            </tr>
+          `;
+        }}).join("");
+      }} catch (err) {{
+        console.error("Failed to load syslogs:", err);
+      }}
+    }}
+
+    function resetSyslogFilters() {{
+      document.getElementById("syslog-search").value = "";
+      document.getElementById("syslog-type").value = "";
+      document.getElementById("syslog-level").value = "";
+      document.getElementById("syslog-device").value = "";
+      document.getElementById("syslog-timeframe").value = "";
+      document.getElementById("syslog-date-from").value = "";
+      document.getElementById("syslog-date-to").value = "";
+      document.getElementById("syslog-custom-dates").style.display = "none";
+      document.getElementById("syslog-limit").value = "100";
+      loadSyslogs();
+    }}
+
+    function exportSyslogs(format) {{
+      const search = document.getElementById("syslog-search").value.trim();
+      const logType = document.getElementById("syslog-type").value;
+      const logLevel = document.getElementById("syslog-level").value;
+      const device = document.getElementById("syslog-device").value;
+      const dateFrom = document.getElementById("syslog-date-from").value;
+      const dateTo = document.getElementById("syslog-date-to").value;
+
+      const params = new URLSearchParams();
+      params.set("format", format);
+      if (search) params.set("search", search);
+      if (logType) params.set("log_type", logType);
+      if (logLevel) params.set("log_level", logLevel);
+      if (device) params.set("device", device);
+      if (dateFrom) params.set("date_from", dateFrom.replace("T", " "));
+      if (dateTo) params.set("date_to", dateTo.replace("T", " "));
+
+      window.open(`${{ROOT_PATH}}/api/syslogs/export?${{params.toString()}}`, "_blank");
+    }}
+
+    function copyLogEncoded(btn, encodedText) {{
+      const text = decodeURIComponent(encodedText);
+      navigator.clipboard.writeText(text).then(() => {{
+        const orig = btn.innerText;
+        btn.innerText = "✓ Kopiert";
+        btn.style.color = "#10b981";
+        setTimeout(() => {{
+          btn.innerText = orig;
+          btn.style.color = "";
+        }}, 1500);
+      }}).catch(err => {{
+        console.error("Copy failed:", err);
+      }});
+    }}
+
+    function escapeHtml(str) {{
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }}
+
     async function openNotifyModal() {{
       const modal = document.getElementById("notify-modal");
       modal.style.display = "flex";
       const sel = document.getElementById("modal-notify-service");
       const sevSel = document.getElementById("modal-notify-severity");
+      const pushTypeSel = document.getElementById("modal-notify-push-type");
+      const retDaysInput = document.getElementById("modal-retention-days");
       const fb = document.getElementById("modal-feedback");
       fb.innerHTML = "";
 
@@ -2216,6 +2902,12 @@ async def dashboard(request: Request):
         }}).join("");
 
         sevSel.value = data.current_min_severity || "CRITICAL";
+        if (pushTypeSel && data.current_push_type) {{
+          pushTypeSel.value = data.current_push_type;
+        }}
+        if (retDaysInput && data.current_retention_days) {{
+          retDaysInput.value = data.current_retention_days;
+        }}
       }} catch (err) {{
         sel.innerHTML = `<option value="none">Fehler beim Laden: ${{err.message}}</option>`;
       }}
@@ -2230,6 +2922,8 @@ async def dashboard(request: Request):
       const fb = document.getElementById("modal-feedback");
       const service = document.getElementById("modal-notify-service").value;
       const severity = document.getElementById("modal-notify-severity").value;
+      const pushType = document.getElementById("modal-notify-push-type").value;
+      const retentionDays = parseInt(document.getElementById("modal-retention-days").value, 10) || 7;
 
       btn.innerText = "⏳ Speichern...";
       btn.disabled = true;
@@ -2237,11 +2931,18 @@ async def dashboard(request: Request):
         const res = await fetch(`${{ROOT_PATH}}/api/settings/notify`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ notify_service: service, notify_min_severity: severity }})
+          body: JSON.stringify({{
+            notify_service: service,
+            notify_min_severity: severity,
+            notify_push_type: pushType,
+            log_retention_days: retentionDays
+          }})
         }});
         const data = await res.json();
         if (data.success) {{
-          fb.innerHTML = `<span style="color:#10b981; font-weight:600;">✓ Gespeichert! Dienst ist aktiv.</span>`;
+          fb.innerHTML = `<span style="color:#10b981; font-weight:600;">✓ Gespeichert! Dienst & Einstellungen aktiv.</span>`;
+          const retEl = document.getElementById("syslog-retention-info");
+          if (retEl) retEl.innerText = `${{retentionDays}} Tage`;
           setTimeout(() => {{ closeNotifyModal(); }}, 1200);
         }} else {{
           fb.innerHTML = `<span style="color:#ef4444;">Fehler beim Speichern.</span>`;
@@ -2259,6 +2960,7 @@ async def dashboard(request: Request):
       const fb = document.getElementById("modal-feedback");
       const service = document.getElementById("modal-notify-service").value;
       const severity = document.getElementById("modal-notify-severity").value;
+      const pushType = document.getElementById("modal-notify-push-type").value;
 
       if (service === "none") {{
         fb.innerHTML = `<span style="color:#f59e0b;">Bitte wähle zuerst einen aktiven Dienst aus!</span>`;
@@ -2271,7 +2973,11 @@ async def dashboard(request: Request):
         const res = await fetch(`${{ROOT_PATH}}/api/settings/notify/test`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ notify_service: service, notify_min_severity: severity }})
+          body: JSON.stringify({{
+            notify_service: service,
+            notify_min_severity: severity,
+            notify_push_type: pushType
+          }})
         }});
         const data = await res.json();
         if (data.success) {{
@@ -2294,7 +3000,11 @@ async def dashboard(request: Request):
 
     setInterval(() => {{
       loadStatus();
-      loadIncidents();
+      if (document.getElementById('view-advisor').style.display !== 'none') {{
+        loadIncidents();
+      }} else {{
+        loadSyslogs();
+      }}
     }}, 10000);
   </script>
 </body>

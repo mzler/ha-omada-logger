@@ -88,7 +88,84 @@ class TestDatabaseSchema(unittest.TestCase):
             );
             """
         )
+        self.db.execute(
+            """
+            CREATE TABLE syslog_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_ip TEXT,
+                device_name TEXT,
+                device_mac TEXT,
+                log_type TEXT DEFAULT 'GENERAL',
+                log_level TEXT DEFAULT 'INFO',
+                message TEXT
+            );
+            """
+        )
         self.db.commit()
+
+    def test_syslog_storage_and_cleanup(self):
+        # Insert test syslog messages
+        self.db.execute(
+            "INSERT INTO syslog_messages (source_ip, device_name, device_mac, message, timestamp) "
+            "VALUES (?, ?, ?, ?, datetime('now', '-10 days'))",
+            ("192.168.0.50", "AP-Wohnzimmer", "00:11:22:33:44:55", "Old message 10 days ago"),
+        )
+        self.db.execute(
+            "INSERT INTO syslog_messages (source_ip, device_name, device_mac, message, timestamp) "
+            "VALUES (?, ?, ?, ?, datetime('now', '-2 days'))",
+            ("192.168.0.50", "AP-Wohnzimmer", "00:11:22:33:44:55", "Recent message 2 days ago"),
+        )
+        self.db.commit()
+
+        # Count total
+        c = self.db.execute("SELECT COUNT(*) FROM syslog_messages").fetchone()[0]
+        self.assertEqual(c, 2)
+
+        # Cleanup older than 7 days
+        self.db.execute("DELETE FROM syslog_messages WHERE timestamp < datetime('now', '-7 days')")
+        self.db.commit()
+
+        # Only 1 recent message should remain
+        c_after = self.db.execute("SELECT COUNT(*) FROM syslog_messages").fetchone()[0]
+        self.assertEqual(c_after, 1)
+
+        remaining = self.db.execute("SELECT message FROM syslog_messages").fetchone()[0]
+        self.assertIn("Recent message", remaining)
+
+    def test_syslog_filtering(self):
+        # Insert various messages
+        self.db.execute(
+            "INSERT INTO syslog_messages (source_ip, device_name, log_type, log_level, message) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("192.168.0.50", "AP-Wohnzimmer", "WIFI", "WARN", "WPA authentication failed for client"),
+        )
+        self.db.execute(
+            "INSERT INTO syslog_messages (source_ip, device_name, log_type, log_level, message) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("192.168.0.2", "Switch-Keller", "PORT_LINK", "CRITICAL", "Port 13 link changed to down"),
+        )
+        self.db.execute(
+            "INSERT INTO syslog_messages (source_ip, device_name, log_type, log_level, message) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("192.168.0.1", "Router-Gateway", "SYSTEM", "INFO", "System clock synchronized"),
+        )
+        self.db.commit()
+
+        # Filter by type
+        wifi_rows = self.db.execute("SELECT * FROM syslog_messages WHERE log_type = 'WIFI'").fetchall()
+        self.assertEqual(len(wifi_rows), 1)
+        self.assertEqual(wifi_rows[0]["device_name"], "AP-Wohnzimmer")
+
+        # Filter by level
+        crit_rows = self.db.execute("SELECT * FROM syslog_messages WHERE log_level = 'CRITICAL'").fetchall()
+        self.assertEqual(len(crit_rows), 1)
+        self.assertEqual(crit_rows[0]["device_name"], "Switch-Keller")
+
+        # Fulltext search
+        search_rows = self.db.execute("SELECT * FROM syslog_messages WHERE message LIKE '%clock%'").fetchall()
+        self.assertEqual(len(search_rows), 1)
+        self.assertEqual(search_rows[0]["device_name"], "Router-Gateway")
 
     def test_insert_and_query_incident(self):
         cur = self.db.execute(
