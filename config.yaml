@@ -1,0 +1,38 @@
+name: "Omada Diagnostic Advisor"
+slug: "omada_diagnostic_advisor"
+version: "1.0.0"
+description: "Intelligente Überwachung von TP-Link Omada Netzwerken: Syslog-Analyse, Link-Drop-Erkennung, SQLite-Historie & HA-Push-Empfehlungen."
+url: "https://github.com/home-assistant/addons"
+arch:
+  - aarch64
+  - amd64
+startup: "services"
+boot: "auto"
+init: false
+ingress: true
+ingress_port: 8099
+homeassistant_api: true
+ports:
+  5514/udp: 5514
+ports_description:
+  5514/udp: "Omada Controller & Access Point Syslog UDP Port"
+options:
+  omada_host: "192.168.1.1"
+  omada_port: 8043
+  omada_user: "admin"
+  omada_password: ""
+  omada_site: "Default"
+  verify_ssl: false
+  poll_interval_seconds: 60
+  notify_service: "none"
+  notify_min_severity: "CRITICAL"
+schema:
+  omada_host: "str"
+  omada_port: "port"
+  omada_user: "str"
+  omada_password: "password"
+  omada_site: "str"
+  verify_ssl: "bool"
+  poll_interval_seconds: "int(10,3600)?"
+  notify_service: "str"
+  notify_min_severity: "list(CRITICAL|WARNING)"

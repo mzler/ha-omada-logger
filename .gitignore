@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite database files (local test files)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# macOS
+.DS_Store
+
+# Environments & Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Home Assistant options for local testing
+options.json
