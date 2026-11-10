@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#0369a1" />
+    </linearGradient>
+
+    <!-- Shield Glow Gradient -->
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- Accent Gradient -->
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+
+    <!-- Filter Shadow -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.5" />
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#38bdf8" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Background Squircle -->
+  <rect x="24" y="24" width="464" height="464" rx="108" ry="108" fill="url(#bgGrad)" stroke="#38bdf8" stroke-width="4" stroke-opacity="0.3" filter="url(#glow)" />
+
+  <!-- Inner Ambient Glow Ring -->
+  <rect x="36" y="36" width="440" height="440" rx="96" ry="96" fill="none" stroke="url(#shieldGrad)" stroke-width="1.5" stroke-opacity="0.4" />
+
+  <!-- Shield Outline (Advisor & Protection) -->
+  <path d="M 256 96 L 376 148 C 376 276 256 364 256 364 C 256 364 136 276 136 148 Z" 
+        fill="#0f172a" fill-opacity="0.75" 
+        stroke="url(#accentGrad)" stroke-width="8" stroke-linejoin="round" />
+
+  <!-- Wi-Fi / Radio Waves (Omada EAP) -->
+  <!-- Outer Wave -->
+  <path d="M 196 176 A 84 84 0 0 1 316 176" 
+        fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round" />
+  <!-- Inner Wave -->
+  <path d="M 220 204 A 50 50 0 0 1 292 204" 
+        fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round" />
+  <!-- Center AP Node -->
+  <circle cx="256" cy="232" r="12" fill="#f8fafc" />
+
+  <!-- Switch / Port / Link Speed Diagnostics (Bottom inside shield) -->
+  <rect x="186" y="268" width="140" height="52" rx="10" ry="10" 
+        fill="#1e293b" stroke="#475569" stroke-width="3" />
+
+  <!-- Switch Ports -->
+  <!-- Port 1: Gigabit OK (Green) -->
+  <rect x="200" y="278" width="18" height="22" rx="3" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+  <circle cx="209" cy="308" r="3.5" fill="#10b981" />
+
+  <!-- Port 2: Gigabit OK (Green) -->
+  <rect x="226" y="278" width="18" height="22" rx="3" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+  <circle cx="235" cy="308" r="3.5" fill="#10b981" />
+
+  <!-- Port 3: Link Degradation Alert (Amber/Red pulse - 100M Aderbruch) -->
+  <rect x="252" y="278" width="18" height="22" rx="3" fill="#0f172a" stroke="#ef4444" stroke-width="2" />
+  <circle cx="261" cy="308" r="4" fill="#ef4444" />
+
+  <!-- Port 4: Gigabit OK (Green) -->
+  <rect x="278" y="278" width="18" height="22" rx="3" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+  <circle cx="287" cy="308" r="3.5" fill="#10b981" />
+
+  <!-- Diagnostic Activity / Pulse Line -->
+  <path d="M 120 408 L 190 408 L 210 380 L 235 436 L 260 392 L 285 418 L 305 408 L 392 408" 
+        fill="none" stroke="#38bdf8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Status Indicator Dot -->
+  <circle cx="392" cy="408" r="6" fill="#10b981" />
+</svg>

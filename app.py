@@ -59,6 +59,7 @@ class AppConfig(BaseModel):
     omada_site: str = "Default"
     verify_ssl: bool = False
     poll_interval_seconds: int = 60
+    syslog_port: int = 5514
     notify_service: str = "none"
     notify_min_severity: str = "CRITICAL"  # "CRITICAL" or "WARNING"
     db_path: str = str(DB_DEFAULT_PATH)
@@ -83,6 +84,7 @@ class AppConfig(BaseModel):
             "omada_site": os.getenv("OMADA_SITE"),
             "verify_ssl": os.getenv("VERIFY_SSL", "").lower() in ("true", "1") if os.getenv("VERIFY_SSL") else None,
             "poll_interval_seconds": int(os.getenv("POLL_INTERVAL")) if os.getenv("POLL_INTERVAL") else None,
+            "syslog_port": int(os.getenv("SYSLOG_PORT")) if os.getenv("SYSLOG_PORT") else None,
             "notify_service": os.getenv("NOTIFY_SERVICE"),
             "notify_min_severity": os.getenv("NOTIFY_MIN_SEVERITY"),
             "db_path": os.getenv("DB_PATH"),
@@ -1033,11 +1035,19 @@ async def lifespan(app: FastAPI):
 
     # Start UDP Syslog listener
     loop = asyncio.get_running_loop()
-    transport, protocol = await loop.create_datagram_endpoint(
-        lambda: syslog_protocol_instance,
-        local_addr=("0.0.0.0", 5514),
-        allow_broadcast=True,
-    )
+    transport = None
+    try:
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: syslog_protocol_instance,
+            local_addr=("0.0.0.0", config.syslog_port),
+            allow_broadcast=True,
+        )
+        logger.info(f"UDP Syslog listener started on 0.0.0.0:{config.syslog_port}")
+    except OSError as e:
+        logger.error(
+            f"Could not bind UDP Syslog listener on port {config.syslog_port}: {e}. "
+            "Omada Controller REST-API Poller and Web Dashboard remain fully operational."
+        )
 
     # Start background polling loop
     poller_task = asyncio.create_task(omada_polling_loop())
@@ -1050,14 +1060,15 @@ async def lifespan(app: FastAPI):
 
     # Teardown
     poller_task.cancel()
-    transport.close()
+    if transport:
+        transport.close()
     logger.info("Omada Diagnostic Advisor background tasks terminated.")
 
 
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -1644,7 +1655,7 @@ async def dashboard(request: Request):
           <span>📨</span>
         </div>
         <div class="status-card-value" id="card-syslog-val">0</div>
-        <div class="status-card-desc">Port 5514/udp aktiv</div>
+        <div class="status-card-desc">Port {config.syslog_port}/udp aktiv</div>
       </div>
     </div>
 

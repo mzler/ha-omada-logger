@@ -112,6 +112,7 @@ notify_min_severity: "CRITICAL"
 | `omada_site` | string | `Default` | Name der zu überwachenden Site im Omada Controller. |
 | `verify_ssl` | boolean | `false` | SSL-Zertifikatsvalidierung für Controller HTTPS-Verbindung. |
 | `poll_interval_seconds` | integer | `60` | Abfrageintervall der Geräte und Ports in Sekunden (10 - 3600). |
+| `syslog_port` | port | `5514` | Interner UDP-Syslog-Port des Add-ons (z. B. 5514 oder 5515). |
 | `notify_service` | string | `none` | Name des HA Notification-Dienstes (z. B. `notify.mobile_app_pixel`). |
 | `notify_min_severity` | string | `CRITICAL` | Mindestschweregrad für Benachrichtigungen (`CRITICAL` oder `WARNING`). |
 

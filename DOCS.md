@@ -122,6 +122,14 @@ action:
 
 ## Fehlerbehebung (Troubleshooting)
 
+### Fehler: "Port 5514 is already in use"
+Dieser Fehler tritt auf, wenn auf deinem Home Assistant Host bereits ein anderer Dienst (z. B. ein anderes Syslog-Add-on oder der Omada-Controller) den UDP-Port 5514 belegt.
+1. Öffne die Add-on-Seite in Home Assistant.
+2. Scrolle zur Karte **Netzwerk**.
+3. Ändere den Host-Port für `5514/udp` auf einen freien Port (z. B. **5515**).
+4. Trage im Omada Controller unter *Syslog* ebenfalls den neuen Port (z. B. 5515) ein.
+5. Starte das Add-on – der Fehler tritt nicht mehr auf.
+
 ### Controller-Verbindung schlägt fehl ("Connection Refused" / "Login rejected")
 1. Prüfe, ob die IP-Adresse und der Port (Standard: 8043) des Omada Controllers korrekt in den Optionen eingetragen sind.
 2. Wenn ein selbstsigniertes SSL-Zertifikat verwendet wird, setze `verify_ssl: false`.

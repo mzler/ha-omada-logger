@@ -2,6 +2,14 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.1.0] - 2026-11-10
+### Hinzugefügt
+- Offizielles Add-on Icon (`icon.png`), Logo (`logo.png`) und Vektor-Grafik (`icon.svg`).
+- Flexibler Syslog-Port: Portbindung in `config.yaml` auf `null` gesetzt, um Portkonflikte (`Port 5514 is already in use`) beim Start zu verhindern.
+- Der Host-Port kann nun im Home Assistant Add-on Dashboard unter "Netzwerk" beliebig vergeben werden (z. B. 5515 oder 5516).
+- Option `syslog_port` im Options-Schema hinzugefügt.
+- Fehlerresistentes Binden des UDP-Sockets: Selbst bei lokalen Port-Kollisionen starten REST-Poller und Web-Dashboard unterbrechungsfrei weiter.
+
 ## [1.0.0] - 2026-11-10
 ### Hinzugefügt
 - Asynchroner UDP Syslog-Server auf Port 5514 zur Verarbeitung von Omada AP- und Switch-Logs.
