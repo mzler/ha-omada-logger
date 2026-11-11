@@ -2150,7 +2150,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.6.0",
+    version="1.6.1",
     lifespan=lifespan,
 )
 
@@ -2946,6 +2946,15 @@ async def dashboard(request: Request):
       background: var(--card-border);
       color: #f8fafc;
     }}
+    .clickable-log-cell {{
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease;
+      position: relative;
+    }}
+    .clickable-log-cell:hover {{
+      background-color: rgba(59, 130, 246, 0.12) !important;
+      color: #93c5fd !important;
+    }}
     .badge-gray {{
       background: #334155;
       color: #94a3b8;
@@ -3363,12 +3372,13 @@ async def dashboard(request: Request):
             <th style="width:105px;">Typ</th>
             <th style="width:85px;">Level</th>
             <th style="width:200px;">Gerät / Quell-IP</th>
-            <th>Syslog Meldung</th>
+            <th>Syslog Meldung (Klick zum Kopieren)</th>
+            <th style="width:95px; text-align:center;">Aktion</th>
           </tr>
         </thead>
         <tbody id="dashboard-syslogs-tbody">
           <tr>
-            <td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Lade aktuelle Syslogs...</td>
+            <td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted);">Lade aktuelle Syslogs...</td>
           </tr>
         </tbody>
       </table>
@@ -3437,7 +3447,8 @@ async def dashboard(request: Request):
           </div>
 
           <!-- Actions -->
-          <div style="display:flex; gap:8px; align-items:center;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button class="btn btn-secondary" type="button" onclick="copyAllVisibleLogs()" title="Alle aktuell gefilterten Logs in die Zwischenablage kopieren">📋 Alle kopieren</button>
             <button class="btn btn-secondary" type="button" onclick="resetSyslogFilters()" title="Filter zurücksetzen">↺ Reset</button>
             <button class="btn btn-secondary" type="button" onclick="exportSyslogs('csv')" title="Gefilterte Logs als CSV exportieren">📊 CSV</button>
             <button class="btn btn-secondary" type="button" onclick="exportSyslogs('json')" title="Gefilterte Logs als JSON exportieren">📥 JSON</button>
@@ -3460,7 +3471,7 @@ async def dashboard(request: Request):
               <th style="width:115px;">Typ</th>
               <th style="width:90px;">Level</th>
               <th style="width:190px;">Gerät / Quell-IP</th>
-              <th>Syslog Meldung</th>
+              <th>Syslog Meldung (Klick zum Kopieren)</th>
               <th style="width:95px; text-align:center;">Aktion</th>
             </tr>
           </thead>
@@ -3566,6 +3577,8 @@ async def dashboard(request: Request):
 
   <script>
     const ROOT_PATH = "{root_path}";
+    let currentLoadedSyslogs = [];
+    let currentDashboardSyslogs = [];
 
     function debounce(func, wait) {{
       let timeout;
@@ -3746,15 +3759,16 @@ async def dashboard(request: Request):
         if (!res.ok) return;
         const data = await res.json();
         const logs = data.logs || [];
+        currentDashboardSyslogs = logs;
         const tbody = document.getElementById("dashboard-syslogs-tbody");
         if (!tbody) return;
 
         if (logs.length === 0) {{
-          tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Noch keine Syslog-Meldungen empfangen.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted);">Noch keine Syslog-Meldungen empfangen.</td></tr>`;
           return;
         }}
 
-        tbody.innerHTML = logs.map(l => {{
+        tbody.innerHTML = logs.map((l, idx) => {{
           let levelBadge = "badge-gray";
           if (l.log_level === "CRITICAL" || l.log_level === "ERROR") levelBadge = "badge-crit";
           else if (l.log_level === "WARN" || l.log_level === "WARNING") levelBadge = "badge-warn";
@@ -3778,8 +3792,11 @@ async def dashboard(request: Request):
                 <strong>${{escapeHtml(devLabel)}}</strong>
                 <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</div>
               </td>
-              <td data-label="Syslog Meldung" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word;">
+              <td data-label="Syslog Meldung" class="clickable-log-cell" onclick="copyDashboardLogByIndex(${{idx}}, this)" title="Klicken, um Meldung direkt in die Zwischenablage zu kopieren" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word;">
                 ${{escapedMsg}}
+              </td>
+              <td data-label="Aktion" style="text-align:center;">
+                <button class="copy-btn" onclick="copyDashboardLogByIndex(${{idx}}, this)" title="In Zwischenablage kopieren">📋 Kopieren</button>
               </td>
             </tr>
           `;
@@ -3925,6 +3942,7 @@ async def dashboard(request: Request):
         if (!res.ok) return;
         const data = await res.json();
         const logs = data.logs || [];
+        currentLoadedSyslogs = logs;
         const tbody = document.getElementById("syslogs-tbody");
         const infoCount = document.getElementById("syslog-info-count");
         if (data.retention_days) {{
@@ -3932,14 +3950,14 @@ async def dashboard(request: Request):
           if (retEl) retEl.innerText = `${{data.retention_days}} Tage`;
         }}
 
-        infoCount.innerText = `Gefiltert: ${{logs.length}} Log-Einträge angezeigt`;
+        infoCount.innerText = `Gefiltert: ${{logs.length}} Log-Einträge angezeigt (Klick auf Meldung oder 📋 zum Kopieren)`;
 
         if (logs.length === 0) {{
           tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-muted);">Keine Syslog-Nachrichten für diese Filtereinstellungen gefunden.</td></tr>`;
           return;
         }}
 
-        tbody.innerHTML = logs.map(l => {{
+        tbody.innerHTML = logs.map((l, idx) => {{
           let levelBadge = "badge-gray";
           if (l.log_level === "CRITICAL" || l.log_level === "ERROR") levelBadge = "badge-crit";
           else if (l.log_level === "WARN" || l.log_level === "WARNING") levelBadge = "badge-warn";
@@ -3987,7 +4005,6 @@ async def dashboard(request: Request):
           }}
 
           const escapedMsg = escapeHtml(l.message || '');
-          const rawForAttr = encodeURIComponent(l.message || '');
 
           return `
             <tr>
@@ -4003,11 +4020,11 @@ async def dashboard(request: Request):
               <td data-label="Gerät / Quell-IP">
                 ${{devLabel}}
               </td>
-              <td data-label="Syslog Meldung" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word; max-width:550px;">
+              <td data-label="Syslog Meldung" class="clickable-log-cell" onclick="copySyslogByIndex(${{idx}}, this)" title="Klicken, um Meldung direkt in die Zwischenablage zu kopieren" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word; max-width:550px;">
                 ${{escapedMsg}}
               </td>
               <td data-label="Aktion" style="text-align:center;">
-                <button class="copy-btn" onclick="copyLogEncoded(this, '${{rawForAttr}}')" title="In Zwischenablage kopieren">📋 Kopieren</button>
+                <button class="copy-btn" onclick="copySyslogByIndex(${{idx}}, this)" title="In Zwischenablage kopieren">📋 Kopieren</button>
               </td>
             </tr>
           `;
@@ -4050,19 +4067,127 @@ async def dashboard(request: Request):
       window.open(`${{ROOT_PATH}}/api/syslogs/export?${{params.toString()}}`, "_blank");
     }}
 
+    function copySyslogByIndex(idx, triggerEl) {{
+      const log = currentLoadedSyslogs[idx];
+      if (!log || !log.message) return;
+      copyTextWithFeedback(log.message, triggerEl, "Syslog-Meldung");
+    }}
+
+    function copyDashboardLogByIndex(idx, triggerEl) {{
+      const log = currentDashboardSyslogs[idx];
+      if (!log || !log.message) return;
+      copyTextWithFeedback(log.message, triggerEl, "Syslog-Meldung");
+    }}
+
+    function copyAllVisibleLogs() {{
+      if (!currentLoadedSyslogs || currentLoadedSyslogs.length === 0) {{
+        showToast("Keine Logs zum Kopieren vorhanden.");
+        return;
+      }}
+      const lines = currentLoadedSyslogs.map(l => {{
+        const ts = l.timestamp || "";
+        const lvl = l.log_level || "INFO";
+        const typ = l.log_type || "GENERAL";
+        const dev = l.custom_name || l.suggested_name || l.device_name || l.source_ip || "Device";
+        return `${{ts}} [${{lvl}}] [${{typ}}] ${{dev}}: ${{l.message || ''}}`;
+      }});
+      copyTextWithFeedback(lines.join("\n"), null, `${{lines.length}} Syslog-Zeilen`);
+    }}
+
+    function copyTextWithFeedback(text, triggerEl, label = "Meldung") {{
+      if (!text) return;
+
+      function onCopied() {{
+        showToast(`✓ ${{label}} in Zwischenablage kopiert!`);
+        if (triggerEl) {{
+          const btn = triggerEl.tagName === "BUTTON" ? triggerEl : triggerEl.querySelector(".copy-btn");
+          if (btn) {{
+            const orig = btn.innerText;
+            btn.innerText = "✓ Kopiert";
+            btn.style.color = "#10b981";
+            setTimeout(() => {{
+              btn.innerText = orig;
+              btn.style.color = "";
+            }}, 1500);
+          }}
+        }}
+      }}
+
+      // Modern async clipboard API (requires secure context / HTTPS / iframe permission)
+      if (navigator.clipboard && (window.isSecureContext || window.location.protocol === "https:")) {{
+        navigator.clipboard.writeText(text)
+          .then(onCopied)
+          .catch(() => fallbackCopyText(text, onCopied));
+      }} else {{
+        fallbackCopyText(text, onCopied);
+      }}
+    }}
+
+    function fallbackCopyText(text, callback) {{
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.top = "-9999px";
+      textArea.style.left = "-9999px";
+      textArea.style.opacity = "0";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {{
+        const successful = document.execCommand("copy");
+        if (successful && callback) {{
+          callback();
+        }} else if (!successful) {{
+          window.prompt("Kopieren mit Strg+C / Cmd+C:", text);
+        }}
+      }} catch (err) {{
+        window.prompt("Kopieren mit Strg+C / Cmd+C:", text);
+      }} finally {{
+        document.body.removeChild(textArea);
+      }}
+    }}
+
+    function showToast(msg) {{
+      let toast = document.getElementById("copy-toast");
+      if (!toast) {{
+        toast = document.createElement("div");
+        toast.id = "copy-toast";
+        toast.style.cssText = `
+          position: fixed;
+          bottom: 24px;
+          right: 24px;
+          background: #10b981;
+          color: #ffffff;
+          padding: 10px 18px;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.88rem;
+          box-shadow: 0 10px 25px -3px rgba(0,0,0,0.5);
+          z-index: 999999;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          transition: opacity 0.25s ease, transform 0.25s ease;
+          opacity: 0;
+          transform: translateY(10px);
+          pointer-events: none;
+        `;
+        document.body.appendChild(toast);
+      }}
+      toast.innerHTML = `<span>📋</span> <span>${{escapeHtml(msg)}}</span>`;
+      toast.style.opacity = "1";
+      toast.style.transform = "translateY(0)";
+
+      if (window._toastTimer) clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => {{
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(10px)";
+      }}, 2000);
+    }}
+
     function copyLogEncoded(btn, encodedText) {{
       const text = decodeURIComponent(encodedText);
-      navigator.clipboard.writeText(text).then(() => {{
-        const orig = btn.innerText;
-        btn.innerText = "✓ Kopiert";
-        btn.style.color = "#10b981";
-        setTimeout(() => {{
-          btn.innerText = orig;
-          btn.style.color = "";
-        }}, 1500);
-      }}).catch(err => {{
-        console.error("Copy failed:", err);
-      }});
+      copyTextWithFeedback(text, btn, "Syslog-Meldung");
     }}
 
     function escapeHtml(str) {{

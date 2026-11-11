@@ -33,7 +33,7 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
   - **Tab 2: Syslog-Protokoll (Alle Logs)**:
     - Vollständige Historie aller empfangenen Syslog-Meldungen, persistent gespeichert für $X$ Tage (`log_retention_days`).
     - Feingranulare Filterung nach Volltextsuche, Protokoll-Typ (WIFI, PORT_LINK, POE, SYSTEM, DHCP), Level (CRITICAL, ERROR, WARN, INFO), Gerät / IP und Zeitfenster (1h, 24h, 7 Tage oder benutzerdefinierter Zeitraum).
-    - Schneller Kopier-Button für jede Log-Zeile sowie separater CSV- und JSON-Export.
+    - Direkter Klick auf beliebige Syslog-Meldung oder 📋-Button zum sofortigen Kopieren ins Clipboard (inkl. 'Alle kopieren'-Button, universalem Ingress-Fallback und Toast-Feedback) sowie separater CSV- und JSON-Export.
   - **Tab 3: Virtuelle Geräte (Inventar & Namenserkennung)**:
     - Automatische Erkennung aller Geräte aus Syslogs (Router, Switches, Access Points, DHCP & WLAN-Clients).
     - OUI-Herstellererkennung (Apple, TP-Link, Espressif, Raspberry Pi, etc.).

@@ -2,6 +2,15 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.6.1] - 2026-11-11
+### Hinzugefügt & Verbessert
+- **Direktes Kopieren von Syslogs in die Zwischenablage (Clipboard)**:
+  - **Ein-Klick-Kopieren auf die Meldung**: Ein Klick direkt auf den Text einer beliebigen Syslog-Meldung (sowohl im Haupt-Dashboard-Live-Stream als auch im vollständigen Syslog-Protokoll) kopiert diese sofort in die Zwischenablage.
+  - **Robuste universelle Clipboard-Unterstützung**: Funktioniert zu 100 % zuverlässig auch innerhalb von Home Assistant Ingress-iFrames, bei HTTP-Verbindungen sowie auf iOS- und Android-Mobilgeräten dank automatischem Fallback über `document.execCommand('copy')`.
+  - **„📋 Alle kopieren“-Button in der Toolbar**: Kopiert alle aktuell gefilterten Syslog-Meldungen sauber formatiert mit Zeitstempel, Level, Typ und Gerät mit einem einzigen Klick.
+  - **Sofortiges visuelles Feedback**: Zeigt ein elegantes Toast-Overlay (*„✓ Syslog-Meldung in Zwischenablage kopiert!“*) und animiert den Kopier-Button auf *„✓ Kopiert“*.
+  - **Kopier-Funktion im Dashboard Live-Stream**: Auch im neuen Live-Stream auf Tab 1 steht nun die direkte Kopier-Aktion zur Verfügung.
+
 ## [1.6.0] - 2026-11-11
 ### Behoben & Verbessert
 - **Zuverlässige AP-Ausfallerkennung & Beseitigung fehlerhafter "Optimal"-Zustände**:
