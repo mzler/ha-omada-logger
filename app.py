@@ -2855,7 +2855,7 @@ async def dashboard(request: Request):
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Omada Diagnostic Advisor</title>
   <style>
     :root {{
@@ -3306,85 +3306,206 @@ async def dashboard(request: Request):
       border-color: var(--accent-blue);
     }}
 
-    /* Mobile Responsive Optimizations */
+    /* Desktop / Mobile Visibility Helpers */
+    .mobile-only {{
+      display: none !important;
+    }}
+    .desktop-only {{
+      display: inline !important;
+    }}
+
+    .subtabs-nav-bar {{
+      display: flex;
+      gap: 10px;
+      margin-bottom: 18px;
+      align-items: center;
+      flex-wrap: wrap;
+    }}
+
+    /* Mobile Responsive Optimizations for Smartphone Portrait */
     @media (max-width: 768px) {{
-      .container {{
-        padding: 12px;
+      .mobile-only {{
+        display: inline !important;
       }}
+      .desktop-only {{
+        display: none !important;
+      }}
+
+      body {{
+        padding: 10px 8px;
+        padding-left: max(8px, env(safe-area-inset-left));
+        padding-right: max(8px, env(safe-area-inset-right));
+        padding-bottom: max(20px, env(safe-area-inset-bottom));
+      }}
+      .container {{
+        padding: 0;
+        width: 100%;
+        max-width: 100%;
+      }}
+
+      /* Header */
       header {{
         flex-direction: column;
-        align-items: flex-start;
-        gap: 12px;
+        align-items: stretch;
+        gap: 10px;
+        margin-bottom: 14px;
+        padding-bottom: 12px;
+      }}
+      .title-area h1 {{
+        font-size: 1.3rem;
+        gap: 8px;
+      }}
+      .title-area p {{
+        font-size: 0.78rem;
+        line-height: 1.35;
       }}
       .header-actions {{
         width: 100%;
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
         gap: 6px;
       }}
       .header-actions .btn {{
-        flex: 1 1 calc(50% - 6px);
+        width: 100%;
         justify-content: center;
-        padding: 8px 6px;
+        padding: 9px 6px;
         font-size: 0.78rem;
+        min-height: 40px;
       }}
+      .header-actions .btn:first-child {{
+        grid-column: span 2;
+      }}
+
+      /* Tabs Navigation */
       .tabs-nav-bar {{
         display: flex !important;
-        overflow-x: auto !important;
-        white-space: nowrap !important;
-        flex-wrap: nowrap !important;
-        scrollbar-width: none;
-        -webkit-overflow-scrolling: touch;
+        width: 100%;
+        gap: 6px !important;
+        margin-bottom: 14px !important;
         padding-bottom: 8px !important;
-        gap: 8px !important;
-      }}
-      .tabs-nav-bar::-webkit-scrollbar {{
-        display: none;
+        border-bottom: 1px solid var(--card-border);
       }}
       .tabs-nav-bar .btn {{
-        flex-shrink: 0;
-        padding: 8px 12px;
-        font-size: 0.82rem;
+        flex: 1 1 0;
+        justify-content: center;
+        padding: 10px 4px;
+        font-size: 0.8rem;
+        min-height: 42px;
+        text-align: center;
+        white-space: nowrap;
       }}
+
+      /* Dashboard Status Cards */
       .status-grid {{
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 8px !important;
+        margin-bottom: 14px !important;
       }}
       .card {{
-        padding: 14px;
+        padding: 12px 14px;
+      }}
+      .status-grid .card {{
+        padding: 10px 12px !important;
+        border-radius: 10px !important;
+      }}
+      .status-card-header {{
+        font-size: 0.7rem !important;
+        margin-bottom: 4px !important;
       }}
       .status-card-value {{
-        font-size: 1.35rem;
+        font-size: 1.25rem !important;
+        gap: 4px;
+      }}
+      .status-card-desc {{
+        font-size: 0.7rem !important;
+        margin-top: 4px !important;
+        line-height: 1.3;
       }}
       .status-banner {{
-        padding: 12px 14px;
-        font-size: 0.85rem;
+        padding: 10px 12px;
+        font-size: 0.82rem;
+        gap: 10px;
+        margin-bottom: 14px;
+        border-radius: 10px;
       }}
-      .filter-bar {{
-        flex-direction: column;
-        align-items: stretch;
-        gap: 12px;
+
+      /* Tab 3 Subtabs Segmented Control */
+      .subtabs-nav-bar {{
+        display: flex !important;
+        width: 100% !important;
+        gap: 6px !important;
+        margin-bottom: 14px !important;
       }}
-      .filter-inputs {{
-        flex-direction: column;
-        align-items: stretch;
-        gap: 8px;
+      .subtabs-nav-bar .btn {{
+        flex: 1 1 50%;
+        justify-content: center;
+        padding: 10px 8px;
+        font-size: 0.82rem;
+        min-height: 40px;
+        text-align: center;
       }}
-      .filter-inputs select,
-      .filter-inputs input[type="text"],
-      #syslog-search, #syslog-type, #syslog-level, #syslog-device, #syslog-timeframe,
-      #device-search, #device-filter-type {{
+
+      /* Filters & Inputs */
+      .filter-bar, .syslog-filter-card, .subview-filter-card {{
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        padding: 12px !important;
+        margin-bottom: 14px !important;
+        border-radius: 10px !important;
+      }}
+      .filter-inputs, .syslog-inputs-group {{
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 8px !important;
+        width: 100% !important;
+      }}
+      select, input[type="text"], input[type="number"], input[type="datetime-local"],
+      #syslog-search, #syslog-type, #syslog-level, #syslog-device, #syslog-timeframe, #syslog-limit,
+      #device-search, #device-filter-type,
+      #client-search, #client-filter-band, #client-filter-signal {{
         width: 100% !important;
         max-width: 100% !important;
-        font-size: 16px !important; /* Prevents auto-zoom on mobile */
+        font-size: 16px !important; /* Prevents auto-zoom on iOS */
+        min-height: 42px !important;
+        padding: 10px 12px !important;
+        box-sizing: border-box;
+      }}
+      .toolbar-actions {{
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 6px !important;
+        width: 100% !important;
+        margin-top: 6px;
+      }}
+      .toolbar-actions .btn {{
+        width: 100% !important;
+        justify-content: center !important;
+        padding: 9px 6px !important;
+        font-size: 0.8rem !important;
+        min-height: 40px !important;
+      }}
+      .syslog-info-bar {{
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 4px !important;
+      }}
+
+      /* Trends Bar Chart */
+      .trends-container {{
+        gap: 12px;
+        margin-bottom: 14px;
+      }}
+      .trend-col:not(:nth-child(4n+1)) .trend-label {{
+        display: none;
       }}
 
       /* Mobile Card Layout for Tables */
       .table-responsive {{
-        background: transparent;
-        border: none;
-        overflow-x: visible;
-        margin-bottom: 16px;
+        background: transparent !important;
+        border: none !important;
+        overflow-x: visible !important;
+        margin-bottom: 14px;
       }}
       .table-responsive table,
       .table-responsive thead,
@@ -3395,19 +3516,19 @@ async def dashboard(request: Request):
         display: block;
       }}
       .table-responsive thead {{
-        display: none;
+        display: none !important;
       }}
       .table-responsive tr {{
-        margin-bottom: 12px;
+        margin-bottom: 10px;
         background: var(--card-bg);
         border: 1px solid var(--card-border);
         border-radius: 12px;
         padding: 12px 14px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.25);
       }}
       .table-responsive td {{
         padding: 6px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -3416,16 +3537,7 @@ async def dashboard(request: Request):
       }}
       .table-responsive td:last-child {{
         border-bottom: none;
-        padding-top: 8px;
-        justify-content: flex-end;
-      }}
-      .table-responsive td[data-label="Meldung"],
-      .table-responsive td[data-label="Syslog Meldung"],
-      .table-responsive td[data-label="Ereignis & Handlungsempfehlung"] {{
-        display: block;
-        max-width: 100% !important;
-        font-size: 0.8rem;
-        line-height: 1.4;
+        padding-top: 10px;
       }}
       .table-responsive td::before {{
         content: attr(data-label);
@@ -3435,15 +3547,134 @@ async def dashboard(request: Request):
         margin-right: 8px;
         flex-shrink: 0;
       }}
+      .table-responsive td[data-label="Gerät / Quell-IP"] {{
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 3px;
+        padding: 8px 0;
+      }}
+      .table-responsive td[data-label="Gerät / Quell-IP"]::before {{
+        margin-bottom: 2px;
+      }}
+      .table-responsive td[data-label="Meldung"],
+      .table-responsive td[data-label="Syslog Meldung"],
+      .table-responsive td[data-label="Ereignis & Handlungsempfehlung"] {{
+        display: block !important;
+        max-width: 100% !important;
+        padding: 8px 0;
+      }}
       .table-responsive td[data-label="Meldung"]::before,
       .table-responsive td[data-label="Syslog Meldung"]::before,
       .table-responsive td[data-label="Ereignis & Handlungsempfehlung"]::before {{
         display: block;
         margin-bottom: 4px;
       }}
+      .clickable-log-cell {{
+        display: block;
+        background: rgba(15, 23, 42, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 0.76rem !important;
+        line-height: 1.45;
+        word-break: break-all;
+        cursor: pointer;
+        position: relative;
+        user-select: text;
+        -webkit-user-select: text;
+        -webkit-tap-highlight-color: rgba(59, 130, 246, 0.3);
+      }}
+      .clickable-log-cell:active {{
+        background: rgba(59, 130, 246, 0.18) !important;
+        border-color: var(--accent-blue);
+      }}
+      .table-responsive td[data-label="Aktion"],
+      .table-responsive td[data-label="Aktionen"] {{
+        display: flex !important;
+        width: 100% !important;
+        padding-top: 10px !important;
+        border-bottom: none !important;
+        justify-content: stretch !important;
+      }}
+      .table-responsive td[data-label="Aktion"]::before,
+      .table-responsive td[data-label="Aktionen"]::before {{
+        display: none !important;
+      }}
+      .table-responsive td[data-label="Aktion"] .copy-btn,
+      .table-responsive td[data-label="Aktion"] .btn,
+      .table-responsive td[data-label="Aktionen"] .btn {{
+        width: 100% !important;
+        justify-content: center !important;
+        padding: 10px 12px !important;
+        font-size: 0.84rem !important;
+        min-height: 40px !important;
+        border-radius: 8px !important;
+      }}
+      .table-responsive td[data-label="Aktionen"] div {{
+        display: flex !important;
+        width: 100% !important;
+        gap: 6px !important;
+      }}
+      .table-responsive td[data-label="Aktionen"] div .btn {{
+        flex: 1 1 0 !important;
+      }}
       .raw-msg {{
         max-width: 100%;
         white-space: normal;
+      }}
+
+      /* Modals on Mobile */
+      .modal-backdrop {{
+        padding: 10px;
+      }}
+      .modal-box {{
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: calc(100vh - 20px) !important;
+        overflow-y: auto !important;
+        padding: 16px 14px !important;
+        border-radius: 14px !important;
+        -webkit-overflow-scrolling: touch;
+      }}
+
+      /* Exception: Port Matrix table inside modal keeps real table format with touch scroll */
+      .modal-box .table-responsive {{
+        overflow-x: auto !important;
+        display: block !important;
+        background: rgba(15, 23, 42, 0.6) !important;
+        border: 1px solid var(--card-border) !important;
+        border-radius: 8px;
+        margin-bottom: 12px;
+      }}
+      .modal-box .table-responsive table {{
+        display: table !important;
+        width: 100% !important;
+        min-width: 480px !important;
+      }}
+      .modal-box .table-responsive thead {{
+        display: table-header-group !important;
+      }}
+      .modal-box .table-responsive tbody {{
+        display: table-row-group !important;
+      }}
+      .modal-box .table-responsive tr {{
+        display: table-row !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+      }}
+      .modal-box .table-responsive td,
+      .modal-box .table-responsive th {{
+        display: table-cell !important;
+        padding: 8px 10px !important;
+        border-bottom: 1px solid var(--card-border) !important;
+        white-space: nowrap !important;
+      }}
+      .modal-box .table-responsive td::before {{
+        display: none !important;
       }}
     }}
   </style>
@@ -3459,11 +3690,11 @@ async def dashboard(request: Request):
         <p>Proaktives TP-Link Omada Netzwerk-Monitoring, Syslog-Heuristik & Handlungsempfehlungen</p>
       </div>
       <div class="header-actions">
-        <button class="btn btn-primary" onclick="pollNow()" id="btn-scan">🔄 Jetzt prüfen</button>
-        <button class="btn btn-secondary" onclick="openNotifyModal()">🔔 Benachrichtigung</button>
-        <button class="btn btn-secondary" onclick="resolveAll()">✓ Alle als behoben markieren</button>
-        <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=csv" download>📥 CSV Export</a>
-        <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=json" download>📥 JSON Export</a>
+        <button class="btn btn-primary" onclick="pollNow()" id="btn-scan">🔄 <span class="desktop-only">Jetzt </span>prüfen</button>
+        <button class="btn btn-secondary" onclick="openNotifyModal()">🔔 <span class="desktop-only">Benachrichtigung</span><span class="mobile-only">Alarm</span></button>
+        <button class="btn btn-secondary" onclick="resolveAll()">✓ <span class="desktop-only">Alle als behoben markieren</span><span class="mobile-only">Alle beheben</span></button>
+        <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=csv" download>📥 CSV<span class="desktop-only"> Export</span></a>
+        <a class="btn btn-secondary" href="{root_path}/api/incidents/export?format=json" download>📥 JSON<span class="desktop-only"> Export</span></a>
       </div>
     </header>
 
@@ -3679,11 +3910,11 @@ async def dashboard(request: Request):
     </div>
 
     <!-- Tabs Navigation -->
-    <div class="tabs-nav-bar" style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px; flex-wrap:wrap; align-items:center;">
-      <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose &amp; Vorfälle</button>
-      <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslog-Protokoll</button>
+    <div class="tabs-nav-bar">
+      <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose<span class="desktop-only"> &amp; Vorfälle</span></button>
+      <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslogs<span class="desktop-only">-Protokoll</span></button>
       <button id="tab-btn-devices" class="btn btn-secondary" onclick="switchTab('devices')">
-        🌐 Virtuelle Geräte <span id="tab-badge-suggestions" class="badge badge-warn" style="margin-left:6px; display:none;">0</span>
+        🌐 <span class="desktop-only">Virtuelle </span>Geräte <span id="tab-badge-suggestions" class="badge badge-warn" style="margin-left:4px; display:none;">0</span>
       </button>
     </div>
 
@@ -3825,10 +4056,10 @@ async def dashboard(request: Request):
     <!-- TAB 2: Syslog View -->
     <div id="view-syslogs" style="display:none;">
       <!-- Syslog Filter Toolbar -->
-      <div class="card" style="margin-bottom:20px; padding:16px;">
+      <div class="card syslog-filter-card" style="margin-bottom:20px; padding:16px;">
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
           <!-- Filter Inputs -->
-          <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+          <div class="filter-inputs syslog-inputs-group" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
             <!-- Fulltext search -->
             <input type="text" id="syslog-search" placeholder="🔍 Suche in Nachricht / IP..." 
                    style="min-width:200px; flex:1;" oninput="debounce(loadSyslogs, 350)()" />
@@ -3887,7 +4118,7 @@ async def dashboard(request: Request):
           </div>
 
           <!-- Actions -->
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <div class="toolbar-actions" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <button class="btn btn-secondary" type="button" onclick="copyAllVisibleLogs()" title="Alle aktuell gefilterten Logs in die Zwischenablage kopieren">📋 Alle kopieren</button>
             <button class="btn btn-secondary" type="button" onclick="resetSyslogFilters()" title="Filter zurücksetzen">↺ Reset</button>
             <button class="btn btn-secondary" type="button" onclick="exportSyslogs('csv')" title="Gefilterte Logs als CSV exportieren">📊 CSV</button>
@@ -3896,7 +4127,7 @@ async def dashboard(request: Request):
         </div>
 
         <!-- Info line -->
-        <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:var(--text-muted); border-top:1px solid rgba(51,65,85,0.4); padding-top:8px;">
+        <div class="syslog-info-bar" style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:var(--text-muted); border-top:1px solid rgba(51,65,85,0.4); padding-top:8px;">
           <div id="syslog-info-count">Lade Syslogs...</div>
           <div>Speicherdauer: <strong id="syslog-retention-info">{config.log_retention_days} Tage</strong> (automatische Bereinigung)</div>
         </div>
@@ -3963,20 +4194,20 @@ async def dashboard(request: Request):
       </div>
 
       <!-- Sub-Navigation for Tab 3 -->
-      <div style="display:flex; gap:10px; margin-bottom:18px; align-items:center; flex-wrap:wrap;">
+      <div class="subtabs-nav-bar">
         <button id="subtab-btn-infra" class="btn btn-primary" onclick="switchDeviceSubTab('infra')">
-          🖥️ Infrastruktur-Geräte (Switches, APs, Router)
+          🖥️ <span class="desktop-only">Infrastruktur-Geräte (Switches, APs, Router)</span><span class="mobile-only">Infrastruktur</span>
         </button>
         <button id="subtab-btn-clients" class="btn btn-secondary" onclick="switchDeviceSubTab('clients')">
-          📱 WLAN-Clients &amp; Signalstärke (RSSI)
+          📱 <span class="desktop-only">WLAN-Clients &amp; Signalstärke (RSSI)</span><span class="mobile-only">WLAN-Clients</span>
         </button>
       </div>
 
       <!-- SUBVIEW 1: Infrastructure Devices -->
       <div id="subview-infra">
-        <div class="card" style="margin-bottom:20px; padding:16px;">
+        <div class="card subview-filter-card" style="margin-bottom:20px; padding:16px;">
           <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
-            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+            <div class="filter-inputs" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
               <input type="text" id="device-search" placeholder="🔍 Suche nach Name, MAC, IP oder Modell..." 
                      style="min-width:220px; flex:1;" oninput="debounce(loadDevices, 350)()" />
 
@@ -3993,9 +4224,9 @@ async def dashboard(request: Request):
               </label>
             </div>
 
-            <div style="display:flex; gap:8px;">
+            <div class="toolbar-actions" style="display:flex; gap:8px;">
               <button class="btn btn-secondary" onclick="rescanDevices()" id="btn-rescan-devs" title="Durchsucht alle empfangenen Syslogs nach neuen MACs und Hostnamen">
-                🔄 Syslogs nach Geräten scannen
+                🔄 <span class="desktop-only">Syslogs nach Geräten scannen</span><span class="mobile-only">Scannen</span>
               </button>
             </div>
           </div>
@@ -4026,9 +4257,9 @@ async def dashboard(request: Request):
 
       <!-- SUBVIEW 2: WLAN Clients -->
       <div id="subview-clients" style="display:none;">
-        <div class="card" style="margin-bottom:20px; padding:16px;">
+        <div class="card subview-filter-card" style="margin-bottom:20px; padding:16px;">
           <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
-            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+            <div class="filter-inputs" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
               <input type="text" id="client-search" placeholder="🔍 Suche nach Client-Name, IP, MAC, SSID..." 
                      style="min-width:240px; flex:1;" oninput="debounce(renderClientsTable, 300)()" />
               
@@ -4047,9 +4278,9 @@ async def dashboard(request: Request):
               </select>
             </div>
 
-            <div style="display:flex; gap:8px;">
+            <div class="toolbar-actions" style="display:flex; gap:8px;">
               <button class="btn btn-secondary" onclick="loadClients()" id="btn-refresh-clients">
-                🔄 Clients aktualisieren
+                🔄 <span class="desktop-only">Clients aktualisieren</span><span class="mobile-only">Aktualisieren</span>
               </button>
             </div>
           </div>
@@ -4658,8 +4889,6 @@ async def dashboard(request: Request):
         toast.id = "copy-toast";
         toast.style.cssText = `
           position: fixed;
-          bottom: 24px;
-          right: 24px;
           background: #10b981;
           color: #ffffff;
           padding: 10px 18px;
@@ -4673,19 +4902,36 @@ async def dashboard(request: Request):
           gap: 8px;
           transition: opacity 0.25s ease, transform 0.25s ease;
           opacity: 0;
-          transform: translateY(10px);
           pointer-events: none;
         `;
         document.body.appendChild(toast);
       }}
+
+      if (window.innerWidth <= 768) {{
+        toast.style.left = "50%";
+        toast.style.right = "auto";
+        toast.style.transform = "translateX(-50%) translateY(0)";
+        toast.style.bottom = "max(16px, env(safe-area-inset-bottom))";
+        toast.style.width = "calc(100% - 32px)";
+        toast.style.maxWidth = "360px";
+        toast.style.justifyContent = "center";
+      }} else {{
+        toast.style.left = "auto";
+        toast.style.right = "24px";
+        toast.style.transform = "translateY(0)";
+        toast.style.bottom = "24px";
+        toast.style.width = "auto";
+        toast.style.maxWidth = "none";
+        toast.style.justifyContent = "flex-start";
+      }}
+
       toast.innerHTML = `<span>📋</span> <span>${{escapeHtml(msg)}}</span>`;
       toast.style.opacity = "1";
-      toast.style.transform = "translateY(0)";
 
       if (window._toastTimer) clearTimeout(window._toastTimer);
       window._toastTimer = setTimeout(() => {{
         toast.style.opacity = "0";
-        toast.style.transform = "translateY(10px)";
+        toast.style.transform = (window.innerWidth <= 768) ? "translateX(-50%) translateY(10px)" : "translateY(10px)";
       }}, 2000);
     }}
 
