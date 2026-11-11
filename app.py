@@ -192,6 +192,55 @@ MAC_SRC_IP_SRC_RE = re.compile(
     r"MAC\s+SRC=([0-9a-fA-F:]{17})\s+IP\s+SRC=([\d\.]+)",
     re.IGNORECASE,
 )
+AP_OUTAGE_RE = re.compile(
+    r"(ap.*(?:offline|disconnected|isolated|lost|down|unreachable|heartbeat.*missed|missed.*heartbeat|timeout)|"
+    r"access\s+point.*(?:offline|disconnected|down|isolated|lost)|"
+    r"(?:eap|ap)[\w\-]+.*(?:disconnected|isolated|offline|down)|"
+    r"heartbeat.*(?:missed|lost)|missed.*heartbeat)",
+    re.IGNORECASE,
+)
+SWITCH_PORT_DOWN_RE = re.compile(
+    r"(link.*changed.*to.*down|port\s+\d+.*(?:link\s+down|down))",
+    re.IGNORECASE,
+)
+
+
+def is_device_offline(dev: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Evaluates whether an Omada network device (AP, Switch, Gateway) is offline or degraded.
+    Returns (is_offline, reason_str).
+    """
+    if dev.get("online") is False:
+        return True, "online is False"
+
+    show_status = str(dev.get("showStatus") or dev.get("statusText") or "").strip().lower()
+    if show_status in (
+        "disconnected",
+        "isolated",
+        "offline",
+        "heartbeat missed",
+        "adoption failed",
+        "missed",
+        "isolated/timeout",
+        "unreachable",
+        "read-only",
+    ):
+        return True, f"Status: {dev.get('showStatus') or show_status}"
+
+    status = dev.get("status")
+    status_cat = dev.get("statusCategory")
+
+    if status_cat is not None and status_cat in (0, 2, 3, 4):
+        return True, f"statusCategory={status_cat}"
+
+    if status is not None and status in (0, 2, 11, 12, 13):
+        return True, f"status={status}"
+
+    if status is not None and status not in (14, 1):
+        if status_cat is not None and status_cat != 1:
+            return True, f"status={status}, category={status_cat}"
+
+    return False, "Online"
 
 
 def lookup_vendor(mac: Optional[str]) -> Optional[str]:
@@ -912,6 +961,23 @@ class DatabaseManager:
                 await db.commit()
                 return cursor.rowcount
 
+    async def resolve_incidents_by_device(self, device_mac: str, category: Optional[str] = None) -> int:
+        """Resolves active incidents matching a device MAC address and optional category"""
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                if category:
+                    cursor = await db.execute(
+                        "UPDATE incidents SET resolved = 1 WHERE device_mac = ? AND category = ? AND resolved = 0",
+                        (device_mac, category),
+                    )
+                else:
+                    cursor = await db.execute(
+                        "UPDATE incidents SET resolved = 1 WHERE device_mac = ? AND resolved = 0",
+                        (device_mac,),
+                    )
+                await db.commit()
+                return cursor.rowcount
+
     async def get_stats(self) -> Dict[str, Any]:
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
@@ -1201,6 +1267,8 @@ class OmadaClient:
         self._omadac_id: Optional[str] = None      # Controller ID, only needed for v5+
         self._api_prefix: str = ""                  # e.g. "/{omadacId}" for v5+ or "" for v4
         self._controller_version: Optional[str] = None
+        self._resolved_site: Optional[str] = None
+        self.known_ap_macs: Dict[str, str] = {}
         self.prev_port_speeds: Dict[Tuple[str, int], int] = {}
         self.last_poll_status: Dict[str, Any] = {
             "success": False,
@@ -1378,10 +1446,60 @@ class OmadaClient:
 
             return None
 
+    async def _resolve_site(self) -> str:
+        """
+        Resolves Omada site slug/ID.
+        Omada v5/v6 often requires internal site ID or specific casing.
+        Queries /{prefix}/api/v2/sites and matches config.omada_site.
+        """
+        if self._resolved_site:
+            return self._resolved_site
+
+        path = f"{self._api_prefix}/api/v2/sites"
+        data = await self._request_with_retry("GET", path)
+        if data and data.get("errorCode", 0) == 0:
+            result = data.get("result", {})
+            sites = result if isinstance(result, list) else result.get("data", [])
+            target = (self.cfg.omada_site or "Default").strip().lower()
+
+            for s in sites:
+                s_name = str(s.get("name", "")).strip().lower()
+                s_site = str(s.get("site", "")).strip().lower()
+                s_id = str(s.get("id", "")).strip().lower()
+                if target in (s_name, s_site, s_id):
+                    self._resolved_site = s.get("site") or s.get("id") or s.get("name")
+                    logger.info(f"Resolved Omada site '{self.cfg.omada_site}' -> '{self._resolved_site}'")
+                    return self._resolved_site
+
+            if sites:
+                first = sites[0]
+                self._resolved_site = first.get("site") or first.get("id") or "Default"
+                logger.info(
+                    f"Omada site '{self.cfg.omada_site}' not found in sites list. "
+                    f"Using first available site: '{self._resolved_site}'"
+                )
+                return self._resolved_site
+
+        self._resolved_site = self.cfg.omada_site or "Default"
+        return self._resolved_site
+
     async def get_devices(self) -> List[Dict[str, Any]]:
         """GET /{prefix}/api/v2/sites/{omada_site}/devices"""
-        path = f"{self._api_prefix}/api/v2/sites/{self.cfg.omada_site}/devices"
+        site_key = await self._resolve_site()
+        path = f"{self._api_prefix}/api/v2/sites/{site_key}/devices"
         data = await self._request_with_retry("GET", path)
+
+        # Fallback if site resolution failed or returned error
+        if not data or data.get("errorCode", 0) != 0:
+            for alt in ("Default", "default"):
+                if alt != site_key:
+                    alt_path = f"{self._api_prefix}/api/v2/sites/{alt}/devices"
+                    alt_data = await self._request_with_retry("GET", alt_path)
+                    if alt_data and alt_data.get("errorCode", 0) == 0:
+                        self._resolved_site = alt
+                        data = alt_data
+                        break
+
         if not data or data.get("errorCode", 0) != 0:
             return []
         result = data.get("result", {})
@@ -1393,7 +1511,8 @@ class OmadaClient:
 
     async def get_device_clients(self, device_mac: str) -> List[Dict[str, Any]]:
         """GET /{prefix}/api/v2/sites/{omada_site}/cmd/devices/{deviceMac}/clients"""
-        path = f"{self._api_prefix}/api/v2/sites/{self.cfg.omada_site}/cmd/devices/{device_mac}/clients"
+        site_key = await self._resolve_site()
+        path = f"{self._api_prefix}/api/v2/sites/{site_key}/cmd/devices/{device_mac}/clients"
         data = await self._request_with_retry("GET", path)
         if not data or data.get("errorCode", 0) != 0:
             return []
@@ -1415,12 +1534,43 @@ class OmadaClient:
                 "success": False,
                 "last_check": now_str,
                 "devices_count": 0,
-                "message": "Controller offline or no devices returned",
+                "message": "Controller offline oder keine Geräte gemeldet",
             }
-            return 0, []
+            rec = (
+                "Omada Controller liefert keine Gerätedaten. Prüfe Controller-IP, Port, "
+                "Zugangsdaten und Site-Name in den Add-on Optionen."
+            )
+            raw_msg = f"Omada Controller returned 0 devices. Host={self.base_url}, Site={self.cfg.omada_site}"
+            inc_id = await db_mgr.record_incident(
+                source_ip=self.cfg.omada_host,
+                device_name="Omada Controller",
+                device_mac="CONTROLLER",
+                severity="WARNING",
+                category="CONTROLLER_OFFLINE",
+                raw_message=raw_msg,
+                action_recommendation=rec,
+            )
+            warn_incidents: List[Dict[str, Any]] = []
+            if inc_id:
+                warn_incidents.append({
+                    "id": inc_id,
+                    "device_name": "Omada Controller",
+                    "severity": "WARNING",
+                    "category": "CONTROLLER_OFFLINE",
+                    "action_recommendation": rec,
+                    "raw_message": raw_msg,
+                })
+            stats = await db_mgr.get_stats()
+            latest = warn_incidents[-1] if warn_incidents else None
+            await ha_client.sync_status_sensors(stats, latest)
+            return 0, warn_incidents
+
+        # Connected and devices returned -> auto-resolve any prior CONTROLLER_OFFLINE
+        await db_mgr.resolve_incidents_by_device("CONTROLLER", category="CONTROLLER_OFFLINE")
 
         new_incidents: List[Dict[str, Any]] = []
         monitored_devices_count = len(devices)
+        current_ap_macs: Set[str] = set()
 
         for dev in devices:
             dev_type = str(dev.get("type", "")).lower()
@@ -1534,8 +1684,12 @@ class OmadaClient:
             # Access Point Evaluation
             # -------------------------------------------------------------
             elif dev_type in ("ap", "eap"):
-                # Status: 14 = Connected, other values = Disconnected / Isolated / Adoption required
-                status = dev.get("status")
+                current_ap_macs.add(dev_mac)
+                self.known_ap_macs[dev_mac] = dev_name
+
+                # AP Health & Outage Detection (supports v4, v5, v6)
+                is_offline, reason = is_device_offline(dev)
+
                 cpu_util = dev.get("cpuUtil") or 0
                 mem_util = dev.get("memUtil") or 0
 
@@ -1563,19 +1717,19 @@ class OmadaClient:
                     channel_util_5g=int(util_5g) if util_5g is not None else None,
                 )
 
-                # HEURISTIC 2: AP Disconnected / Isolated
-                if status is not None and status != 14:
+                # HEURISTIC 2: AP Disconnected / Isolated / Outage
+                if is_offline:
                     rec = (
-                        f"Management-Kontakt zum Access Point {dev_name} verloren (Status {status}). "
-                        f"PoE-Spannungsabfall durch Passthrough-Last oder Switch-Uplink prüfen."
+                        f"Management-Kontakt zum Access Point {dev_name} verloren ({reason}). "
+                        f"PoE-Stromversorgung, Switch-Port oder Netzwerkkabel prüfen."
                     )
-                    raw_msg = f"Access Point offline or isolated: AP={dev_name} ({dev_mac}), Status={status}, IP={dev_ip}"
+                    raw_msg = f"Access Point offline or isolated: AP={dev_name} ({dev_mac}), Reason={reason}, IP={dev_ip}"
                     inc_id = await db_mgr.record_incident(
                         source_ip=dev_ip,
                         device_name=dev_name,
                         device_mac=dev_mac,
                         severity="CRITICAL",
-                        category="INFORM_TIMEOUT",
+                        category="AP_OUTAGE",
                         raw_message=raw_msg,
                         action_recommendation=rec,
                     )
@@ -1584,17 +1738,21 @@ class OmadaClient:
                             "id": inc_id,
                             "device_name": dev_name,
                             "severity": "CRITICAL",
-                            "category": "INFORM_TIMEOUT",
+                            "category": "AP_OUTAGE",
                             "action_recommendation": rec,
                             "raw_message": raw_msg,
                         }
                         new_incidents.append(inc_item)
                         await ha_client.send_notification(
-                            title="⚠️ Omada AP Isoliert / Offline",
+                            title=f"⚠️ Omada AP Ausfall: {dev_name}",
                             message=f"Kritisch: {rec}",
                             severity="CRITICAL",
                             action=rec,
                         )
+                else:
+                    # Healthy & connected -> auto-resolve any prior AP_OUTAGE or INFORM_TIMEOUT
+                    await db_mgr.resolve_incidents_by_device(dev_mac, category="AP_OUTAGE")
+                    await db_mgr.resolve_incidents_by_device(dev_mac, category="INFORM_TIMEOUT")
 
                 # HEURISTIC 4: High 2.4-GHz interference (>80%)
                 if util_2g and int(util_2g) > 80:
@@ -1626,6 +1784,41 @@ class OmadaClient:
                             title="⚠️ Omada WLAN-Interferenz",
                             message=f"Warnung: {rec}",
                             severity="WARNING",
+                            action=rec,
+                        )
+
+        # Check if an AP that was previously known in the controller has vanished
+        if self.known_ap_macs and current_ap_macs:
+            for known_mac, known_name in list(self.known_ap_macs.items()):
+                if known_mac not in current_ap_macs:
+                    rec = (
+                        f"Access Point {known_name} ({known_mac}) antwortet nicht mehr im Controller (Gerät verschwunden). "
+                        f"PoE-Port oder Switch-Uplink prüfen."
+                    )
+                    raw_msg = f"Access Point disappeared from controller device list: AP={known_name} ({known_mac})"
+                    inc_id = await db_mgr.record_incident(
+                        source_ip="",
+                        device_name=known_name,
+                        device_mac=known_mac,
+                        severity="CRITICAL",
+                        category="AP_OUTAGE",
+                        raw_message=raw_msg,
+                        action_recommendation=rec,
+                    )
+                    if inc_id:
+                        inc_item = {
+                            "id": inc_id,
+                            "device_name": known_name,
+                            "severity": "CRITICAL",
+                            "category": "AP_OUTAGE",
+                            "action_recommendation": rec,
+                            "raw_message": raw_msg,
+                        }
+                        new_incidents.append(inc_item)
+                        await ha_client.send_notification(
+                            title=f"⚠️ Omada AP Verschwunden: {known_name}",
+                            message=f"Kritisch: {rec}",
+                            severity="CRITICAL",
                             action=rec,
                         )
 
@@ -1719,6 +1912,68 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
             )
         except Exception as e:
             logger.error(f"Error persisting syslog message: {e}")
+
+        # Heuristic: AP Outage / Disconnection in Syslog
+        if AP_OUTAGE_RE.search(message):
+            rec = f"Access Point Verbindung verloren oder Heartbeat verpasst: {device_name}. Switch-Port, PoE-Strom oder Verkabelung prüfen."
+            inc_id = await db_mgr.record_incident(
+                source_ip=source_ip,
+                device_name=device_name,
+                device_mac=device_mac,
+                severity="CRITICAL",
+                category="AP_OUTAGE",
+                raw_message=message,
+                action_recommendation=rec,
+            )
+            if inc_id:
+                await ha_client.send_notification(
+                    title=f"⚠️ Omada AP Ausfall: {device_name}",
+                    message=f"Kritisch: {rec}\nEvent: {message[:140]}",
+                    severity="CRITICAL",
+                    action=rec,
+                )
+                stats = await db_mgr.get_stats()
+                await ha_client.sync_status_sensors(
+                    stats,
+                    {
+                        "device_name": device_name,
+                        "action_recommendation": rec,
+                        "category": "AP_OUTAGE",
+                        "severity": "CRITICAL",
+                    },
+                )
+            return
+
+        # Heuristic: Switch Port Down
+        if SWITCH_PORT_DOWN_RE.search(message):
+            rec = f"Switch-Port Link Down erkannt auf {device_name}. Kabelverbindung oder angeschlossenes Gerät prüfen."
+            inc_id = await db_mgr.record_incident(
+                source_ip=source_ip,
+                device_name=device_name,
+                device_mac=device_mac,
+                severity="CRITICAL",
+                category="HARDWARE_LINK",
+                raw_message=message,
+                action_recommendation=rec,
+            )
+            if inc_id:
+                await ha_client.send_notification(
+                    title=f"⚠️ Omada Port Down: {device_name}",
+                    message=f"Kritisch: {rec}\nEvent: {message[:140]}",
+                    severity="CRITICAL",
+                    action=rec,
+                )
+                stats = await db_mgr.get_stats()
+                await ha_client.sync_status_sensors(
+                    stats,
+                    {
+                        "device_name": device_name,
+                        "action_recommendation": rec,
+                        "category": "HARDWARE_LINK",
+                        "severity": "CRITICAL",
+                    },
+                )
+            return
 
         # Heuristic 2: Inform Timeout
         if INFORM_TIMEOUT_RE.search(message):
@@ -1895,7 +2150,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
 )
 
@@ -2696,6 +2951,156 @@ async def dashboard(request: Request):
       color: #94a3b8;
       border: 1px solid #475569;
     }}
+
+    .clickable-card {{
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease;
+    }}
+    .clickable-card:hover {{
+      transform: translateY(-2px);
+      border-color: var(--accent-blue);
+    }}
+
+    /* Mobile Responsive Optimizations */
+    @media (max-width: 768px) {{
+      .container {{
+        padding: 12px;
+      }}
+      header {{
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }}
+      .header-actions {{
+        width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }}
+      .header-actions .btn {{
+        flex: 1 1 calc(50% - 6px);
+        justify-content: center;
+        padding: 8px 6px;
+        font-size: 0.78rem;
+      }}
+      .tabs-nav-bar {{
+        display: flex !important;
+        overflow-x: auto !important;
+        white-space: nowrap !important;
+        flex-wrap: nowrap !important;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 8px !important;
+        gap: 8px !important;
+      }}
+      .tabs-nav-bar::-webkit-scrollbar {{
+        display: none;
+      }}
+      .tabs-nav-bar .btn {{
+        flex-shrink: 0;
+        padding: 8px 12px;
+        font-size: 0.82rem;
+      }}
+      .status-grid {{
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }}
+      .card {{
+        padding: 14px;
+      }}
+      .status-card-value {{
+        font-size: 1.35rem;
+      }}
+      .status-banner {{
+        padding: 12px 14px;
+        font-size: 0.85rem;
+      }}
+      .filter-bar {{
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+      }}
+      .filter-inputs {{
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+      }}
+      .filter-inputs select,
+      .filter-inputs input[type="text"],
+      #syslog-search, #syslog-type, #syslog-level, #syslog-device, #syslog-timeframe,
+      #device-search, #device-filter-type {{
+        width: 100% !important;
+        max-width: 100% !important;
+        font-size: 16px !important; /* Prevents auto-zoom on mobile */
+      }}
+
+      /* Mobile Card Layout for Tables */
+      .table-responsive {{
+        background: transparent;
+        border: none;
+        overflow-x: visible;
+        margin-bottom: 16px;
+      }}
+      .table-responsive table,
+      .table-responsive thead,
+      .table-responsive tbody,
+      .table-responsive th,
+      .table-responsive td,
+      .table-responsive tr {{
+        display: block;
+      }}
+      .table-responsive thead {{
+        display: none;
+      }}
+      .table-responsive tr {{
+        margin-bottom: 12px;
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 12px;
+        padding: 12px 14px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+      }}
+      .table-responsive td {{
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.84rem;
+        word-break: break-word;
+      }}
+      .table-responsive td:last-child {{
+        border-bottom: none;
+        padding-top: 8px;
+        justify-content: flex-end;
+      }}
+      .table-responsive td[data-label="Meldung"],
+      .table-responsive td[data-label="Syslog Meldung"],
+      .table-responsive td[data-label="Ereignis & Handlungsempfehlung"] {{
+        display: block;
+        max-width: 100% !important;
+        font-size: 0.8rem;
+        line-height: 1.4;
+      }}
+      .table-responsive td::before {{
+        content: attr(data-label);
+        font-weight: 600;
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        margin-right: 8px;
+        flex-shrink: 0;
+      }}
+      .table-responsive td[data-label="Meldung"]::before,
+      .table-responsive td[data-label="Syslog Meldung"]::before,
+      .table-responsive td[data-label="Ereignis & Handlungsempfehlung"]::before {{
+        display: block;
+        margin-bottom: 4px;
+      }}
+      .raw-msg {{
+        max-width: 100%;
+        white-space: normal;
+      }}
+    }}
   </style>
 </head>
 <body>
@@ -2828,7 +3233,7 @@ async def dashboard(request: Request):
     </div>
 
     <!-- Tabs Navigation -->
-    <div style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px; flex-wrap:wrap; align-items:center;">
+    <div class="tabs-nav-bar" style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px; flex-wrap:wrap; align-items:center;">
       <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose &amp; Vorfälle</button>
       <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslog-Protokoll</button>
       <button id="tab-btn-devices" class="btn btn-secondary" onclick="switchTab('devices')">
@@ -2870,13 +3275,13 @@ async def dashboard(request: Request):
         <div class="status-card-value" id="card-devices-val">0</div>
         <div class="status-card-desc" id="card-devices-desc">Omada Switches & APs</div>
       </div>
-      <div class="card">
+      <div class="card clickable-card" onclick="switchTab('syslogs')" title="Klicken, um zum Syslog-Protokoll zu wechseln">
         <div class="status-card-header">
           <span>Syslog Empfangen</span>
-          <span>📨</span>
+          <span style="font-size:0.8rem; color:var(--accent-blue);">Protokoll ➔</span>
         </div>
         <div class="status-card-value" id="card-syslog-val">0</div>
-        <div class="status-card-desc">Port {config.syslog_port}/udp aktiv</div>
+        <div class="status-card-desc">Port {config.syslog_port}/udp aktiv (Klicken zum Öffnen)</div>
       </div>
     </div>
 
@@ -2935,6 +3340,35 @@ async def dashboard(request: Request):
         <tbody id="incidents-tbody">
           <tr>
             <td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">Lade Vorfälle...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Live Syslog Stream Section on Dashboard -->
+    <div style="display:flex; justify-content:space-between; align-items:center; margin: 28px 0 12px 0; flex-wrap:wrap; gap:8px;">
+      <h3 style="font-size:1.05rem; font-weight:600; display:flex; align-items:center; gap:8px; margin:0; color:var(--text-main);">
+        <span>📡 Neueste Syslog-Aktivität (Live-Stream)</span>
+      </h3>
+      <button class="btn btn-secondary" onclick="switchTab('syslogs')" style="padding:6px 12px; font-size:0.8rem;">
+        Alle Logs im Syslog-Protokoll anzeigen ➔
+      </button>
+    </div>
+
+    <div class="table-responsive">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:160px;">Zeitstempel</th>
+            <th style="width:105px;">Typ</th>
+            <th style="width:85px;">Level</th>
+            <th style="width:200px;">Gerät / Quell-IP</th>
+            <th>Syslog Meldung</th>
+          </tr>
+        </thead>
+        <tbody id="dashboard-syslogs-tbody">
+          <tr>
+            <td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Lade aktuelle Syslogs...</td>
           </tr>
         </tbody>
       </table>
@@ -3169,14 +3603,22 @@ async def dashboard(request: Request):
           banner.className = "status-banner crit";
           bannerText.innerHTML = `<strong>KRITISCH:</strong> ${{activeCrit}} aktive(r) kritische(r) Vorfall/Vorfälle erfordern sofortige Handlung!`;
           statusVal.innerHTML = `<span style="color:#ef4444;">Kritisch</span>`;
+          document.getElementById("card-status-desc").innerText = `${{activeCrit}} kritische Störung(en)`;
         }} else if (activeWarn > 0) {{
           banner.className = "status-banner warn";
           bannerText.innerHTML = `<strong>WARNUNG:</strong> ${{activeWarn}} Warnung(en) aktiv. Netzwerkleistung ggf. beeinträchtigt.`;
           statusVal.innerHTML = `<span style="color:#f59e0b;">Warnung</span>`;
+          document.getElementById("card-status-desc").innerText = `${{activeWarn}} Warnung(en) aktiv`;
+        }} else if (!controller.success || (controller.devices_count || 0) === 0) {{
+          banner.className = "status-banner warn";
+          bannerText.innerHTML = `<strong>EINGESCHRÄNKT:</strong> Keine Geräte über Omada-Controller überwacht (${{controller.message || 'Verbindung prüfen'}}). Syslog-Empfang ist aktiv (${{data.syslog_messages_received || 0}} Logs empfangen).`;
+          statusVal.innerHTML = `<span style="color:#f59e0b;">Eingeschränkt</span>`;
+          document.getElementById("card-status-desc").innerText = controller.message || "Controller nicht erreichbar";
         }} else {{
           banner.className = "status-banner ok";
-          bannerText.innerHTML = `<strong>OPTIMAL:</strong> Keine aktiven Netzwerkvorfälle. Alle überwachten Geräte arbeiten störungsfrei.`;
+          bannerText.innerHTML = `<strong>OPTIMAL:</strong> Keine aktiven Netzwerkvorfälle. Alle überwachten Geräte (${{controller.devices_count}}) arbeiten störungsfrei.`;
           statusVal.innerHTML = `<span style="color:#10b981;">Optimal</span>`;
+          document.getElementById("card-status-desc").innerText = `Controller verbunden (${{controller.devices_count}} Geräte)`;
         }}
 
         // Render Top affected devices
@@ -3256,20 +3698,20 @@ async def dashboard(request: Request):
 
           return `
             <tr style="${{isResolved ? 'opacity: 0.55;' : ''}}">
-              <td style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem;">
+              <td data-label="Zeitstempel" style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem;">
                 ${{inc.timestamp}}
               </td>
-              <td>
+              <td data-label="Schweregrad">
                 <span class="badge ${{badgeClass}}">${{inc.severity}}</span>
               </td>
-              <td>
+              <td data-label="Kategorie">
                 <span class="badge badge-cat">${{inc.category || "GENERAL"}}</span>
               </td>
-              <td>
+              <td data-label="Gerät / MAC">
                 <strong>${{inc.device_name || "Unbekannt"}}</strong>
                 <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{inc.device_mac || ""}}</div>
               </td>
-              <td>
+              <td data-label="Ereignis & Handlungsempfehlung">
                 <div class="action-box">
                   <strong>Empfehlung:</strong> ${{inc.action_recommendation}}
                 </div>
@@ -3277,12 +3719,12 @@ async def dashboard(request: Request):
                   Detail: ${{inc.raw_message || 'N/A'}}
                 </div>
               </td>
-              <td>
+              <td data-label="Status">
                 ${{isResolved 
                   ? '<span style="color:#10b981; font-weight:600; font-size:0.8rem;">✓ Behoben</span>' 
                   : '<span style="color:#ef4444; font-weight:600; font-size:0.8rem;">● Aktiv</span>'}}
               </td>
-              <td>
+              <td data-label="Aktion">
                 ${{!isResolved ? `
                   <button class="btn btn-secondary" style="padding:4px 10px; font-size:0.75rem;" onclick="resolveIncident(${{inc.id}})">
                     Beheben
@@ -3295,6 +3737,55 @@ async def dashboard(request: Request):
 
       }} catch (err) {{
         console.error("Failed to load incidents:", err);
+      }}
+    }}
+
+    async function loadDashboardSyslogs() {{
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/syslogs?limit=8`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const logs = data.logs || [];
+        const tbody = document.getElementById("dashboard-syslogs-tbody");
+        if (!tbody) return;
+
+        if (logs.length === 0) {{
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Noch keine Syslog-Meldungen empfangen.</td></tr>`;
+          return;
+        }}
+
+        tbody.innerHTML = logs.map(l => {{
+          let levelBadge = "badge-gray";
+          if (l.log_level === "CRITICAL" || l.log_level === "ERROR") levelBadge = "badge-crit";
+          else if (l.log_level === "WARN" || l.log_level === "WARNING") levelBadge = "badge-warn";
+          else if (l.log_level === "INFO") levelBadge = "badge-info";
+
+          const devLabel = l.custom_name || l.suggested_name || l.device_name || l.source_ip || "Unbekannt";
+          const escapedMsg = escapeHtml(l.message || '');
+
+          return `
+            <tr>
+              <td data-label="Zeitstempel" style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem; font-family:monospace;">
+                ${{l.timestamp || ''}}
+              </td>
+              <td data-label="Typ">
+                <span class="badge badge-cat">${{l.log_type || 'GENERAL'}}</span>
+              </td>
+              <td data-label="Level">
+                <span class="badge ${{levelBadge}}">${{l.log_level || 'INFO'}}</span>
+              </td>
+              <td data-label="Gerät / Quell-IP">
+                <strong>${{escapeHtml(devLabel)}}</strong>
+                <div style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</div>
+              </td>
+              <td data-label="Syslog Meldung" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word;">
+                ${{escapedMsg}}
+              </td>
+            </tr>
+          `;
+        }}).join("");
+      }} catch (err) {{
+        console.error("Failed to load dashboard syslogs:", err);
       }}
     }}
 
@@ -3500,22 +3991,22 @@ async def dashboard(request: Request):
 
           return `
             <tr>
-              <td style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem; font-family:monospace;">
+              <td data-label="Zeitstempel" style="white-space:nowrap; color:var(--text-muted); font-size:0.8rem; font-family:monospace;">
                 ${{l.timestamp || ''}}
               </td>
-              <td>
+              <td data-label="Typ">
                 <span class="badge badge-cat">${{l.log_type || 'GENERAL'}}</span>
               </td>
-              <td>
+              <td data-label="Level">
                 <span class="badge ${{levelBadge}}">${{l.log_level || 'INFO'}}</span>
               </td>
-              <td>
+              <td data-label="Gerät / Quell-IP">
                 ${{devLabel}}
               </td>
-              <td style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-all; max-width:550px;">
+              <td data-label="Syslog Meldung" style="font-family:'Courier New', monospace; font-size:0.8rem; word-break:break-word; max-width:550px;">
                 ${{escapedMsg}}
               </td>
-              <td style="text-align:center;">
+              <td data-label="Aktion" style="text-align:center;">
                 <button class="copy-btn" onclick="copyLogEncoded(this, '${{rawForAttr}}')" title="In Zwischenablage kopieren">📋 Kopieren</button>
               </td>
             </tr>
@@ -3654,19 +4145,19 @@ async def dashboard(request: Request):
 
           return `
             <tr>
-              <td>
+              <td data-label="Gerätename">
                 <div style="display:flex; align-items:center; gap:8px;">
                   <strong style="font-size:0.95rem;">${{displayName}}</strong>
                   <button class="copy-btn" style="padding:2px 6px;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Name bearbeiten">✏️</button>
                 </div>
               </td>
-              <td>${{suggestionHtml}}</td>
-              <td><span class="badge ${{typeBadge}}">${{typeIcon}} ${{d.device_type || 'client'}}</span></td>
-              <td style="font-family:monospace; font-size:0.82rem;">${{d.mac || '-'}} ${{vendorStr}}</td>
-              <td style="font-family:monospace; font-size:0.82rem;">${{d.ip || '-'}}</td>
-              <td style="font-size:0.85rem;"><span class="badge badge-gray">${{d.log_count || 1}} Logs</span></td>
-              <td style="font-size:0.8rem; color:var(--text-muted); white-space:nowrap;">${{d.last_seen || ''}}</td>
-              <td style="text-align:center;">
+              <td data-label="Namensvorschlag">${{suggestionHtml}}</td>
+              <td data-label="Typ"><span class="badge ${{typeBadge}}">${{typeIcon}} ${{d.device_type || 'client'}}</span></td>
+              <td data-label="MAC-Adresse" style="font-family:monospace; font-size:0.82rem;">${{d.mac || '-'}} ${{vendorStr}}</td>
+              <td data-label="IP-Adresse" style="font-family:monospace; font-size:0.82rem;">${{d.ip || '-'}}</td>
+              <td data-label="Syslogs" style="font-size:0.85rem;"><span class="badge badge-gray">${{d.log_count || 1}} Logs</span></td>
+              <td data-label="Zuletzt gesehen" style="font-size:0.8rem; color:var(--text-muted); white-space:nowrap;">${{d.last_seen || ''}}</td>
+              <td data-label="Aktionen" style="text-align:center;">
                 <div style="display:inline-flex; gap:6px;">
                   <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')">✏️ Umbenennen</button>
                   <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="filterSyslogByDevice('${{d.ip || d.mac || ''}}')" title="Logs dieses Geräts anzeigen">📜 Logs</button>
@@ -3825,12 +4316,14 @@ async def dashboard(request: Request):
     loadStatus();
     loadTrends();
     loadIncidents();
+    loadDashboardSyslogs();
     loadDevices();
 
     setInterval(() => {{
       loadStatus();
       if (document.getElementById('view-advisor').style.display !== 'none') {{
         loadIncidents();
+        loadDashboardSyslogs();
       }} else if (document.getElementById('view-syslogs').style.display !== 'none') {{
         loadSyslogs();
       }} else if (document.getElementById('view-devices').style.display !== 'none') {{

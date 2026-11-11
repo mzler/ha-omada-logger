@@ -2,7 +2,21 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
-## [1.5.0] - 2026-11-10
+## [1.6.0] - 2026-11-11
+### Behoben & Verbessert
+- **Zuverlässige AP-Ausfallerkennung & Beseitigung fehlerhafter "Optimal"-Zustände**:
+  - Wenn der Controller offline ist oder keine Geräte liefert (0 überwachte Geräte), wird der Gesamtstatus niemals mehr fälschlicherweise als "Optimal" angezeigt, sondern als "Eingeschränkt / Warnung" mit genauer Fehlerursache und Hinweis auf aktiven Syslog-Empfang.
+  - Erweiterte AP-Ausfallprüfung: Erkennt `online: false`, Status-Strings (`Disconnected`, `Isolated`, `Heartbeat Missed`, `Offline`, `Adoption Failed`), Controller-Statuscodes (v4/v5/v6) sowie das plötzliche Verschwinden zuvor erreichbarer Access Points aus dem Controller.
+  - Automatische Site-ID-Erkennung: Ermittelt die korrekte Site-ID dynamisch über `GET /{omadacId}/api/v2/sites` mit sicherem Fallback auf `Default` / Standard-Site.
+  - Syslog-Heuristik für AP-Ausfälle: Eingehende Disconnect-, Heartbeat-Missed- und Switch-Port-Down-Meldungen im Syslog erzeugen sofort einen KRITISCHEN Vorfall (`AP_OUTAGE`) und senden Push-Benachrichtigungen.
+  - Automatische Entwarnung: Kehrt ein AP oder der Controller in den Normalzustand zurück, werden offene Störungsmeldungen automatisch als behoben markiert.
+- **Vollständig überarbeitete mobile Darstellung (Responsive UI)**:
+  - Breites horizontales Scrollen von Tabellen auf Smartphones behoben: Tabellenzeilen transformieren sich auf Bildschirmen unter 768px nahtlos in kompakte, strukturierte Mobile-Cards mit klaren Feldbezeichnungen (`data-label`).
+  - Horizontal wischbare Tab-Leiste (`overflow-x: auto; scrollbar-width: none`) verhindert störendes Umbrechen der Navigations-Buttons auf schmalen Displays.
+  - Optimierte 2-Spalten-Statistik-Karten und iOS-Zoom-Schutz für Texteingaben und Dropdowns.
+- **Syslog-Live-Stream auf dem Haupt-Dashboard**:
+  - Auf Tab 1 (Dashboard) werden nun die neuesten Syslog-Ereignisse in einem Live-Stream direkt unter den Vorfällen angezeigt, sodass empfangene Protokolle sofort sichtbar sind.
+  - Die Statistik-Karte *"Syslog Empfangen"* ist ab sofort interaktiv anklickbar (`Protokoll ➔`) und wechselt mit einem Klick in das vollständige Syslog-Archiv.
 ### Hinzugefügt
 - **Automatische Geräteerkennung aus Syslog-Meldungen**:
   - Extrahiert automatisch Hostnamen aus Syslog-Headern (z. B. `ER605`, `TL-SG2008P`, `EAP610`), Access-Point-MACs (`AP MAC=...`), DHCP-Server-Zuweisungen (`DHCP allocated IP ... for client [MAC]`) und Quell-IPs/MACs.

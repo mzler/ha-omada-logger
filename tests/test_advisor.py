@@ -44,6 +44,52 @@ MAC_SRC_IP_SRC_RE = re.compile(
     r"MAC\s+SRC=([0-9a-fA-F:]{17})\s+IP\s+SRC=([\d\.]+)",
     re.IGNORECASE,
 )
+AP_OUTAGE_RE = re.compile(
+    r"(ap.*(?:offline|disconnected|isolated|lost|down|unreachable|heartbeat.*missed|missed.*heartbeat|timeout)|"
+    r"access\s+point.*(?:offline|disconnected|down|isolated|lost)|"
+    r"(?:eap|ap)[\w\-]+.*(?:disconnected|isolated|offline|down)|"
+    r"heartbeat.*(?:missed|lost)|missed.*heartbeat)",
+    re.IGNORECASE,
+)
+SWITCH_PORT_DOWN_RE = re.compile(
+    r"(link.*changed.*to.*down|port\s+\d+.*(?:link\s+down|down))",
+    re.IGNORECASE,
+)
+
+
+def is_device_offline(dev):
+    """Evaluates whether an Omada network device is offline or degraded."""
+    if dev.get("online") is False:
+        return True, "online is False"
+
+    show_status = str(dev.get("showStatus") or dev.get("statusText") or "").strip().lower()
+    if show_status in (
+        "disconnected",
+        "isolated",
+        "offline",
+        "heartbeat missed",
+        "adoption failed",
+        "missed",
+        "isolated/timeout",
+        "unreachable",
+        "read-only",
+    ):
+        return True, f"Status: {dev.get('showStatus') or show_status}"
+
+    status = dev.get("status")
+    status_cat = dev.get("statusCategory")
+
+    if status_cat is not None and status_cat in (0, 2, 3, 4):
+        return True, f"statusCategory={status_cat}"
+
+    if status is not None and status in (0, 2, 11, 12, 13):
+        return True, f"status={status}"
+
+    if status is not None and status not in (14, 1):
+        if status_cat is not None and status_cat != 1:
+            return True, f"status={status}, category={status_cat}"
+
+    return False, "Online"
 
 
 def lookup_vendor(mac):
@@ -421,6 +467,73 @@ class TestDeviceInventory(unittest.TestCase):
         row_rejected = con.execute("SELECT * FROM network_devices WHERE id = 2").fetchone()
         self.assertEqual(row_rejected["suggested_rejected"], "Unknown-iOS")
         self.assertIsNone(row_rejected["suggested_name"])
+
+    def test_is_device_offline_detection(self):
+        # 1. online flag is False
+        self.assertTrue(is_device_offline({"online": False})[0])
+
+        # 2. String status variants
+        self.assertTrue(is_device_offline({"showStatus": "Disconnected"})[0])
+        self.assertTrue(is_device_offline({"showStatus": "Isolated"})[0])
+        self.assertTrue(is_device_offline({"showStatus": "Heartbeat Missed"})[0])
+        self.assertTrue(is_device_offline({"statusText": "offline"})[0])
+
+        # 3. Status integer codes
+        self.assertTrue(is_device_offline({"status": 0})[0])
+        self.assertTrue(is_device_offline({"status": 2})[0])
+        self.assertTrue(is_device_offline({"status": 11})[0])
+        self.assertTrue(is_device_offline({"statusCategory": 0})[0])
+
+        # 4. Healthy / Connected device
+        self.assertFalse(is_device_offline({"online": True, "status": 14, "statusCategory": 1})[0])
+        self.assertFalse(is_device_offline({"status": 14, "showStatus": "Connected"})[0])
+
+    def test_ap_outage_regex(self):
+        # Disconnect messages
+        self.assertTrue(bool(AP_OUTAGE_RE.search("AP 0c:ef:15:1b:be:fe disconnected from controller")))
+        self.assertTrue(bool(AP_OUTAGE_RE.search("ap[0c-ef-15-1b-be-fe] is offline")))
+        self.assertTrue(bool(AP_OUTAGE_RE.search("Access Point EAP653-Flur lost connection")))
+        self.assertTrue(bool(AP_OUTAGE_RE.search("heartbeat missed for AP [0c:ef:15:1b:be:fe]")))
+        self.assertTrue(bool(AP_OUTAGE_RE.search("EAP615-Wall disconnected")))
+
+        # Benign messages that should NOT match
+        self.assertFalse(bool(AP_OUTAGE_RE.search("DHCP Server allocated IP address 192.168.0.187 for client")))
+        self.assertFalse(bool(AP_OUTAGE_RE.search("client 04:17:b6:97:0e:dc connected to SSID HomeNet")))
+
+    def test_switch_port_down_regex(self):
+        self.assertTrue(bool(SWITCH_PORT_DOWN_RE.search("Port 5 link down")))
+        self.assertTrue(bool(SWITCH_PORT_DOWN_RE.search("link changed to down on port 13")))
+        self.assertFalse(bool(SWITCH_PORT_DOWN_RE.search("Port 5 link up at 1000Mbps")))
+
+    def test_resolve_incidents_by_device(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.execute(
+            """
+            CREATE TABLE incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_mac TEXT,
+                category TEXT,
+                resolved INTEGER DEFAULT 0
+            );
+            """
+        )
+        con.execute("INSERT INTO incidents (device_mac, category, resolved) VALUES ('0C:EF:15:1B:BE:FE', 'AP_OUTAGE', 0)")
+        con.execute("INSERT INTO incidents (device_mac, category, resolved) VALUES ('0C:EF:15:1B:BE:FE', 'INFORM_TIMEOUT', 0)")
+        con.execute("INSERT INTO incidents (device_mac, category, resolved) VALUES ('CONTROLLER', 'CONTROLLER_OFFLINE', 0)")
+        con.commit()
+
+        # Resolve only AP_OUTAGE for that MAC
+        cursor = con.execute("UPDATE incidents SET resolved = 1 WHERE device_mac = ? AND category = ? AND resolved = 0", ("0C:EF:15:1B:BE:FE", "AP_OUTAGE"))
+        con.commit()
+        self.assertEqual(cursor.rowcount, 1)
+
+        # Check remaining active
+        remaining = con.execute("SELECT category FROM incidents WHERE resolved = 0").fetchall()
+        categories = [r["category"] for r in remaining]
+        self.assertNotIn("AP_OUTAGE", categories)
+        self.assertIn("INFORM_TIMEOUT", categories)
+        self.assertIn("CONTROLLER_OFFLINE", categories)
 
 
 if __name__ == "__main__":

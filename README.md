@@ -23,8 +23,11 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
   4. **2.4-GHz-Kanalüberlastung**: Alarmiert bei Kanal-Auslastung `> 80%` mit Optimierungshinweisen für Kanal- und Sendeleistung.
 - **Home Assistant Ingress Dark-Mode Dashboard**:
   - **Tab 1: Diagnose & Vorfälle**:
-    - Übersichtlicher Gesundheitsstatus (Optimal / Warnung / Kritisch).
+    - Übersichtlicher Gesundheitsstatus (Optimal / Eingeschränkt / Warnung / Kritisch).
+    - Direkter Syslog-Live-Stream der neuesten Ereignisse auf dem Dashboard.
+    - Klickbare Statistik-Karte *"Syslog Empfangen"* mit Schnellsprung ins Protokoll.
     - Live-Tabelle der aktiven und behobenen Vorfälle mit Filterung nach Gerät und Schweregrad.
+    - Vollständig responsives Mobile-Layout für Smartphones (Card-Darstellung für alle Tabellen, wischbare Tab-Leiste).
     - Trend-Analyse (Häufung nach Uhrzeit und am stärksten betroffenen Geräten).
     - Direkte Aktions-Buttons: *"Als behoben markieren"*, *"Alle beheben"*, *"CSV/JSON Export"* und manueller Scan-Trigger.
   - **Tab 2: Syslog-Protokoll (Alle Logs)**:
