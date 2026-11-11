@@ -2,6 +2,39 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.7.0] - 2026-11-11
+### Hinzugefügt & Erweitert ("Alle Features")
+- **Erweiterte Hardware- & Geräte-Informationen**:
+  - Automatisches Auslesen und Speichern von genauer Modellbezeichnung (`model`), Firmware-Version (`firmwareVersion`), Update-Verfügbarkeit (`needUpgrade`), Uptime (formatiert in `Tage, Std., Min.`), CPU- und RAM-Auslastung für alle TP-Link Omada Geräte (Router, Switches, Access Points).
+  - Automatischer DB-Schema-Upgrade für bestehende SQLite-Datenbanken ohne Datenverlust.
+- **Interaktives Geräte-Detail-Modal (`🔍 Details`)**:
+  - Detaillierter Hardware-Diagnose-Dialog beim Klick auf jedes Infrastruktur-Gerät.
+  - **Switch-Port Matrix & Kabeldiagnose**: Zeigt alle Switch-Ports inklusive Port-Nummer, Profil/Name, Verbindungsgeschwindigkeit (10M/100M/1G/2.5G/10G), PoE-Leistungsaufnahme in Watt, Rx/Tx Datenübertragung sowie CRC- und Rx-Fehlerzähler.
+  - **Access Point Funk- & Frequenzstatus**: Detailanzeige für 2.4 GHz, 5 GHz (inkl. DFS-Kanal-Kennzeichnung) und 6 GHz (Wi-Fi 6E/7) mit Funkkanal, Sendeleistung (dBm) und Kanalauslastung in Prozent.
+  - **Router / Gateway WAN-Status**: WAN-IP, Gateway, DNS-Server und Link-Status.
+  - Direktsprung zu allen Logs des Geräts aus dem Detail-Dialog heraus.
+- **Heuristik 5: Port-Kabeldiagnose & Proaktive CRC-Fehlererkennung**:
+  - Kontinuierliche Überwachung von Übertragungs- und Prüfsummenfehlern (`rxCrcErrors`, `crcErrorPackets`, `rxErrors`) je Switch-Port.
+  - Erkennt beschädigte Patchkabel, Wackelkontakte, unsaubere RJ45-Crimpungen oder EMV-Störungen frühzeitig, *bevor* ein kompletter Verbindungsabbruch (Link-Drop) auftritt.
+  - Erzeugt automatisch Vorfälle der Kategorie `CABLE_INTEGRITY` (WARNING bei geringem, CRITICAL bei starkem Anstieg) mit Push-Alarmierung.
+- **Controller-Ereignisse & DFS Radar-Stream**:
+  - Polling von TP-Link Omada Controller Events (`/api/v2/sites/{site}/events` und `/logs`).
+  - Automatische Übernahme und Klassifizierung neuer Events in das persistente Syslog-Archiv (`ROAMING`, `RADAR_DFS`, `CONTROLLER_EVENT`).
+  - **5 GHz DFS Radarimpuls-Erkennung (`RADAR_DFS`)**: Erkennt, wenn ein Access Point aufgrund von Wetterradar-Signalen den 5-GHz-Kanal automatisch räumt, und erzeugt eine Vorfallsmeldung mit Handlungsempfehlung.
+- **WLAN-Clients & Signalstärke-Diagnose (Sub-Navigation in Tab 3)**:
+  - Neuer Sub-Tab **[📱 WLAN-Clients & Signalstärke]** neben den Infrastruktur-Geräten.
+  - Auflistung aller aktiven Endgeräte mit Hostname, IP, MAC, Hersteller-OUI, verbundenem Access Point und SSID.
+  - Frequenzband (2.4 GHz, 5 GHz, 6 GHz) und Kanal.
+  - **Farbcodierte Signalstärke-Ampel (RSSI in dBm)**:
+    - 🟢 Ausgezeichnet (&ge; -65 dBm)
+    - 🟡 Gut (-66 bis -72 dBm)
+    - 🟠 Mittelmäßig (-73 bis -80 dBm)
+    - 🔴 Schwach (&lt; -80 dBm)
+  - Anzeige von Durchsatz / Übertragungsraten (Rx/Tx) und Verbindungsdauer (Uptime).
+  - Schnelle Filter nach Frequenzband und Signalstärke.
+- **Neue Filter im Syslog-Archiv (Tab 2)**:
+  - Protokoll-Typen erweitert um `WLAN-Roaming (ROAMING)`, `DFS / Radarimpuls (RADAR_DFS)` und `Controller-Events (CONTROLLER_EVENT)`.
+
 ## [1.6.1] - 2026-11-11
 ### Hinzugefügt & Verbessert
 - **Direktes Kopieren von Syslogs in die Zwischenablage (Clipboard)**:

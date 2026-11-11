@@ -175,6 +175,40 @@ POE_OVERLOAD_RE = re.compile(r"(poe.*overload|poe.*power.*drop|insufficient.*pow
 MAC_ADDRESS_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
 
 
+def classify_syslog(message: str):
+    """Classifies syslog message into (log_type, log_level)"""
+    m = message.lower()
+    if any(k in m for k in ("crit", "fatal", "emergency", "alert", "timeout isolated", "inform timeout", "overload")):
+        level = "CRITICAL"
+    elif any(k in m for k in ("err", "fail", "drop", "reject", "denied")):
+        level = "ERROR"
+    elif any(k in m for k in ("warn", "degrad", "interfer", "reason: 15", "retry", "loss", "radar", "dfs")):
+        level = "WARN"
+    else:
+        level = "INFO"
+
+    if any(k in m for k in ("radar", "dfs")):
+        log_type = "RADAR_DFS"
+    elif any(k in m for k in ("roam", "roaming", "fast bss", "802.11r", "802.11k", "802.11v")):
+        log_type = "ROAMING"
+    elif any(k in m for k in ("controller event", "controller_event", "[controller event]")):
+        log_type = "CONTROLLER_EVENT"
+    elif any(k in m for k in ("poe", "power overload", "power supply", "poe power")):
+        log_type = "POE"
+    elif any(k in m for k in ("wifi", "wlan", "ssid", "handshake", "eapol", "assoc", "disassoc", "wpa", "client", "radio", "channel")):
+        log_type = "WIFI"
+    elif any(k in m for k in ("inform", "isolated", "adopt", "upgrade", "reboot", "heartbeat", "controller", "management", "login", "auth")):
+        log_type = "SYSTEM"
+    elif any(k in m for k in ("port", "link", "speed", "gigabit", "duplex", "switch", "sfp", "vlan", "cable", "crc")):
+        log_type = "PORT_LINK"
+    elif any(k in m for k in ("dhcp", "lease", "dns", "gateway", "ip", "subnet", "arp")):
+        log_type = "DHCP"
+    else:
+        log_type = "GENERAL"
+
+    return log_type, level
+
+
 class TestHeuristics(unittest.TestCase):
     def test_inform_timeout_detection(self):
         msg1 = "[AP-Wohnzimmer] [Inform timeout] Device failed to contact controller at 192.168.1.1:8043"
@@ -534,6 +568,90 @@ class TestDeviceInventory(unittest.TestCase):
         self.assertNotIn("AP_OUTAGE", categories)
         self.assertIn("INFORM_TIMEOUT", categories)
         self.assertIn("CONTROLLER_OFFLINE", categories)
+
+
+class TestExtendedDiagnostics(unittest.TestCase):
+    def test_classify_syslog_types(self):
+        t1, l1 = classify_syslog("Radar detected on channel 100, switching AP to channel 36")
+        self.assertEqual(t1, "RADAR_DFS")
+        self.assertEqual(l1, "WARN")
+
+        t2, l2 = classify_syslog("Client 04:17:B6:97:0E:DC performed 802.11r fast bss roaming to AP-Buero")
+        self.assertEqual(t2, "ROAMING")
+        self.assertEqual(l2, "INFO")
+
+        t3, l3 = classify_syslog("[Controller Event] Admin user logged into controller from 192.168.0.50")
+        self.assertEqual(t3, "CONTROLLER_EVENT")
+
+        t4, l4 = classify_syslog("Switch PoE power overload detected on Port 3, drop power")
+        self.assertEqual(t4, "POE")
+        self.assertEqual(l4, "CRITICAL")
+
+    def test_cable_integrity_crc_error_logic(self):
+        prev_crc = 10
+        current_crc_small = 15
+        delta_small = current_crc_small - prev_crc
+        self.assertEqual(delta_small, 5)
+        sev_small = "CRITICAL" if delta_small >= 20 else "WARNING"
+        self.assertEqual(sev_small, "WARNING")
+
+        current_crc_large = 35
+        delta_large = current_crc_large - prev_crc
+        self.assertEqual(delta_large, 25)
+        sev_large = "CRITICAL" if delta_large >= 20 else "WARNING"
+        self.assertEqual(sev_large, "CRITICAL")
+
+    def test_device_extended_hardware_schema(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.execute(
+            """
+            CREATE TABLE network_devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac TEXT UNIQUE,
+                ip TEXT,
+                custom_name TEXT,
+                suggested_name TEXT,
+                device_type TEXT DEFAULT 'client',
+                vendor TEXT,
+                model TEXT,
+                firmware TEXT,
+                need_upgrade BOOLEAN DEFAULT 0,
+                uptime INTEGER DEFAULT 0,
+                cpu_util INTEGER,
+                mem_util INTEGER,
+                client_count INTEGER DEFAULT 0,
+                status_text TEXT,
+                ports_json TEXT,
+                wireless_json TEXT,
+                wan_json TEXT,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                log_count INTEGER DEFAULT 1
+            );
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO network_devices (
+                mac, ip, custom_name, suggested_name, device_type, vendor,
+                model, firmware, need_upgrade, uptime, cpu_util, mem_util, client_count, status_text
+            ) VALUES (
+                '00:0A:EB:11:22:33', '192.168.0.2', 'Core Switch', 'TL-SG2210P', 'switch', 'TP-Link',
+                'TL-SG2210P v5.0', '1.0.3 Build 20240315', 1, 864000, 15, 38, 8, 'Connected'
+            )
+            """
+        )
+        con.commit()
+
+        row = con.execute("SELECT * FROM network_devices WHERE mac = '00:0A:EB:11:22:33'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["model"], "TL-SG2210P v5.0")
+        self.assertEqual(row["firmware"], "1.0.3 Build 20240315")
+        self.assertEqual(row["need_upgrade"], 1)
+        self.assertEqual(row["uptime"], 864000)
+        self.assertEqual(row["cpu_util"], 15)
+        self.assertEqual(row["mem_util"], 38)
+        self.assertEqual(row["client_count"], 8)
 
 
 if __name__ == "__main__":

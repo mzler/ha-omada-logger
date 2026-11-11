@@ -128,17 +128,25 @@ def classify_syslog(message: str) -> Tuple[str, str]:
         level = "CRITICAL"
     elif any(k in m for k in ("err", "fail", "drop", "reject", "denied")):
         level = "ERROR"
-    elif any(k in m for k in ("warn", "degrad", "interfer", "reason: 15", "retry", "loss")):
+    elif any(k in m for k in ("warn", "degrad", "interfer", "reason: 15", "retry", "loss", "radar", "dfs")):
         level = "WARN"
     else:
         level = "INFO"
 
     # Determine Category / Type
-    if any(k in m for k in ("wifi", "wlan", "ssid", "handshake", "eapol", "assoc", "disassoc", "roam", "wpa", "client", "radio", "channel")):
+    if any(k in m for k in ("radar", "dfs")):
+        log_type = "RADAR_DFS"
+    elif any(k in m for k in ("roam", "roaming", "fast bss", "802.11r", "802.11k", "802.11v")):
+        log_type = "ROAMING"
+    elif any(k in m for k in ("controller event", "controller_event", "[controller event]")):
+        log_type = "CONTROLLER_EVENT"
+    elif any(k in m for k in ("poe", "power overload", "power supply", "poe power")):
+        log_type = "POE"
+    elif any(k in m for k in ("wifi", "wlan", "ssid", "handshake", "eapol", "assoc", "disassoc", "wpa", "client", "radio", "channel")):
         log_type = "WIFI"
     elif any(k in m for k in ("inform", "isolated", "adopt", "upgrade", "reboot", "heartbeat", "controller", "management", "login", "auth")):
         log_type = "SYSTEM"
-    elif any(k in m for k in ("port", "link", "speed", "poe", "gigabit", "duplex", "switch", "sfp", "vlan", "cable")):
+    elif any(k in m for k in ("port", "link", "speed", "gigabit", "duplex", "switch", "sfp", "vlan", "cable", "crc")):
         log_type = "PORT_LINK"
     elif any(k in m for k in ("dhcp", "lease", "dns", "gateway", "ip", "subnet", "arp")):
         log_type = "DHCP"
@@ -432,6 +440,26 @@ class DatabaseManager:
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_dev_ip ON network_devices(ip);")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_dev_name ON network_devices(custom_name);")
 
+                # Auto-migration for network_devices extended hardware columns
+                cols_to_add = [
+                    ("model", "TEXT"),
+                    ("firmware", "TEXT"),
+                    ("need_upgrade", "BOOLEAN DEFAULT 0"),
+                    ("uptime", "INTEGER DEFAULT 0"),
+                    ("cpu_util", "INTEGER"),
+                    ("mem_util", "INTEGER"),
+                    ("client_count", "INTEGER DEFAULT 0"),
+                    ("status_text", "TEXT"),
+                    ("ports_json", "TEXT"),
+                    ("wireless_json", "TEXT"),
+                    ("wan_json", "TEXT"),
+                ]
+                for col_name, col_type in cols_to_add:
+                    try:
+                        await db.execute(f"ALTER TABLE network_devices ADD COLUMN {col_name} {col_type};")
+                    except Exception:
+                        pass
+
                 await db.commit()
                 logger.info(f"Database initialized at {self.db_path}")
 
@@ -469,6 +497,17 @@ class DatabaseManager:
         device_type: Optional[str] = None,
         vendor: Optional[str] = None,
         custom_name: Optional[str] = None,
+        model: Optional[str] = None,
+        firmware: Optional[str] = None,
+        need_upgrade: Optional[bool] = None,
+        uptime: Optional[int] = None,
+        cpu_util: Optional[int] = None,
+        mem_util: Optional[int] = None,
+        client_count: Optional[int] = None,
+        status_text: Optional[str] = None,
+        ports_json: Optional[str] = None,
+        wireless_json: Optional[str] = None,
+        wan_json: Optional[str] = None,
     ) -> Optional[int]:
         """Insert or update a network device record with MAC/IP matching & name suggestions"""
         if not mac and not ip:
@@ -518,15 +557,36 @@ class DatabaseManager:
                     new_ip = ip or row["ip"]
                     new_vendor = vendor or existing_vendor
 
+                    # Decide hardware info
+                    keys = row.keys()
+                    new_model = model or (row["model"] if "model" in keys else None)
+                    new_fw = firmware or (row["firmware"] if "firmware" in keys else None)
+                    new_upgrade = (1 if need_upgrade else 0) if need_upgrade is not None else (row["need_upgrade"] if "need_upgrade" in keys else 0)
+                    new_uptime = uptime if uptime is not None else (row["uptime"] if "uptime" in keys else 0)
+                    new_cpu = cpu_util if cpu_util is not None else (row["cpu_util"] if "cpu_util" in keys else None)
+                    new_mem = mem_util if mem_util is not None else (row["mem_util"] if "mem_util" in keys else None)
+                    new_clients = client_count if client_count is not None else (row["client_count"] if "client_count" in keys else 0)
+                    new_status = status_text or (row["status_text"] if "status_text" in keys else None)
+                    new_ports = ports_json or (row["ports_json"] if "ports_json" in keys else None)
+                    new_wireless = wireless_json or (row["wireless_json"] if "wireless_json" in keys else None)
+                    new_wan = wan_json or (row["wan_json"] if "wan_json" in keys else None)
+
                     await db.execute(
                         """
                         UPDATE network_devices
                         SET mac = ?, ip = ?, custom_name = ?, suggested_name = ?,
                             device_type = ?, vendor = ?, last_seen = CURRENT_TIMESTAMP,
-                            log_count = log_count + 1
+                            log_count = log_count + 1,
+                            model = ?, firmware = ?, need_upgrade = ?, uptime = ?,
+                            cpu_util = ?, mem_util = ?, client_count = ?, status_text = ?,
+                            ports_json = ?, wireless_json = ?, wan_json = ?
                         WHERE id = ?
                         """,
-                        (new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor, dev_id),
+                        (
+                            new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor,
+                            new_model, new_fw, new_upgrade, new_uptime, new_cpu, new_mem,
+                            new_clients, new_status, new_ports, new_wireless, new_wan, dev_id,
+                        ),
                     )
                     await db.commit()
                     return dev_id
@@ -540,10 +600,19 @@ class DatabaseManager:
 
                     cur = await db.execute(
                         """
-                        INSERT INTO network_devices (mac, ip, custom_name, suggested_name, device_type, vendor, log_count)
-                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                        INSERT INTO network_devices (
+                            mac, ip, custom_name, suggested_name, device_type, vendor,
+                            model, firmware, need_upgrade, uptime, cpu_util, mem_util,
+                            client_count, status_text, ports_json, wireless_json, wan_json, log_count
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                         """,
-                        (new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor),
+                        (
+                            new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor,
+                            model, firmware, 1 if need_upgrade else 0, uptime or 0,
+                            cpu_util, mem_util, client_count or 0, status_text,
+                            ports_json, wireless_json, wan_json,
+                        ),
                     )
                     await db.commit()
                     return cur.lastrowid
@@ -1270,6 +1339,9 @@ class OmadaClient:
         self._resolved_site: Optional[str] = None
         self.known_ap_macs: Dict[str, str] = {}
         self.prev_port_speeds: Dict[Tuple[str, int], int] = {}
+        self.prev_port_crc: Dict[Tuple[str, int], int] = {}
+        self.seen_event_ids: Set[str] = set()
+        self.cached_clients: List[Dict[str, Any]] = []
         self.last_poll_status: Dict[str, Any] = {
             "success": False,
             "last_check": None,
@@ -1521,6 +1593,43 @@ class OmadaClient:
             return result
         return result.get("data", [])
 
+    async def get_controller_events(self, limit: int = 40) -> List[Dict[str, Any]]:
+        """GET /{prefix}/api/v2/sites/{omada_site}/events?currentPage=1&currentPageSize={limit}"""
+        site_key = await self._resolve_site()
+        path = f"{self._api_prefix}/api/v2/sites/{site_key}/events"
+        params = {"currentPage": 1, "currentPageSize": limit}
+        data = await self._request_with_retry("GET", path, params=params)
+        if not data or data.get("errorCode", 0) != 0:
+            log_path = f"{self._api_prefix}/api/v2/sites/{site_key}/logs"
+            data = await self._request_with_retry("GET", log_path, params=params)
+
+        if not data or data.get("errorCode", 0) != 0:
+            return []
+        result = data.get("result", {})
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("data") or result.get("rows") or []
+        return []
+
+    async def get_clients(self, limit: int = 250) -> List[Dict[str, Any]]:
+        """GET /{prefix}/api/v2/sites/{omada_site}/clients?currentPage=1&currentPageSize={limit}"""
+        site_key = await self._resolve_site()
+        path = f"{self._api_prefix}/api/v2/sites/{site_key}/clients"
+        params = {"currentPage": 1, "currentPageSize": limit}
+        data = await self._request_with_retry("GET", path, params=params)
+        if not data or data.get("errorCode", 0) != 0:
+            return self.cached_clients
+        result = data.get("result", {})
+        clients: List[Dict[str, Any]] = []
+        if isinstance(result, list):
+            clients = result
+        elif isinstance(result, dict):
+            clients = result.get("data") or result.get("rows") or []
+        if clients:
+            self.cached_clients = clients
+        return clients
+
     async def poll_and_evaluate(self) -> Tuple[int, List[Dict[str, Any]]]:
         """
         Polls Omada devices, evaluates switch ports & AP status,
@@ -1578,6 +1687,24 @@ class OmadaClient:
             dev_mac = dev.get("mac") or dev.get("deviceMac") or "UNKNOWN-MAC"
             dev_ip = dev.get("ip") or dev.get("ipv4") or ""
 
+            # Extended device info extraction
+            dev_model = dev.get("model") or dev.get("showModel") or dev.get("deviceModel")
+            dev_firmware = dev.get("firmwareVersion") or dev.get("version")
+            dev_need_upgrade = bool(dev.get("needUpgrade") or dev.get("hasUpgrade"))
+            dev_uptime = dev.get("uptime") or 0
+            dev_cpu = dev.get("cpuUtil")
+            dev_mem = dev.get("memUtil")
+            dev_clients = dev.get("clientNum") or dev.get("clientCount") or dev.get("activeClientNum") or 0
+            dev_status_text = dev.get("statusDesc") or dev.get("statusCategory") or str(dev.get("status", ""))
+
+            # JSON structures for modal details
+            ports_raw = dev.get("portStats") or dev.get("portConfigs") or dev.get("ports")
+            dev_ports_json = json.dumps(ports_raw) if ports_raw else None
+            wireless_raw = {"wp2g": dev.get("wp2g"), "wp5g": dev.get("wp5g"), "wp6g": dev.get("wp6g")} if (dev.get("wp2g") or dev.get("wp5g")) else None
+            dev_wireless_json = json.dumps(wireless_raw) if wireless_raw else None
+            wan_raw = dev.get("wanPort") or dev.get("wanPorts") or dev.get("wanStatus") or dev.get("ipSetting")
+            dev_wan_json = json.dumps(wan_raw) if wan_raw else None
+
             # Upsert into device inventory with suggested name from controller
             clean_type = "router" if dev_type in ("gateway", "router") else ("switch" if "switch" in dev_type else ("ap" if "ap" in dev_type else "client"))
             try:
@@ -1587,6 +1714,17 @@ class OmadaClient:
                     suggested_name=dev.get("name"),
                     device_type=clean_type,
                     vendor="TP-Link",
+                    model=dev_model,
+                    firmware=dev_firmware,
+                    need_upgrade=dev_need_upgrade,
+                    uptime=dev_uptime,
+                    cpu_util=dev_cpu,
+                    mem_util=dev_mem,
+                    client_count=dev_clients,
+                    status_text=dev_status_text,
+                    ports_json=dev_ports_json,
+                    wireless_json=dev_wireless_json,
+                    wan_json=dev_wan_json,
                 )
             except Exception as e:
                 logger.debug(f"Device upsert error in poller: {e}")
@@ -1675,6 +1813,56 @@ class OmadaClient:
                                 severity="CRITICAL",
                                 action=rec,
                             )
+
+                    # HEURISTIC 5: Cable Diagnostics & CRC transmission errors
+                    crc_errors = (
+                        p.get("rxCrcErrors")
+                        or p.get("crcErrorPackets")
+                        or p.get("crcErrors")
+                        or p.get("rxErrors")
+                        or 0
+                    )
+                    crc_key = (dev_mac, int(port_id))
+                    prev_crc = self.prev_port_crc.get(crc_key)
+                    if prev_crc is not None and crc_errors > prev_crc:
+                        delta_crc = int(crc_errors - prev_crc)
+                        crc_sev = "CRITICAL" if delta_crc >= 20 else "WARNING"
+                        rec = (
+                            f"Switch-Port {port_id} ({dev_name}) registriert {delta_crc} neue CRC-Übertragungsfehler "
+                            f"(Gesamt: {crc_errors}). Verdacht auf beschädigtes Patchkabel, Wackelkontakt, EMV-Störung oder defekte Buchse."
+                        )
+                        raw_msg = (
+                            f"Switch port CRC error increase: Switch={dev_name} ({dev_mac}), "
+                            f"Port={port_id} ({port_name}), DeltaCRC={delta_crc}, TotalCRC={crc_errors}"
+                        )
+                        inc_id = await db_mgr.record_incident(
+                            source_ip=dev_ip,
+                            device_name=dev_name,
+                            device_mac=dev_mac,
+                            severity=crc_sev,
+                            category="CABLE_INTEGRITY",
+                            raw_message=raw_msg,
+                            action_recommendation=rec,
+                        )
+                        if inc_id:
+                            inc_item = {
+                                "id": inc_id,
+                                "device_name": dev_name,
+                                "severity": crc_sev,
+                                "category": "CABLE_INTEGRITY",
+                                "action_recommendation": rec,
+                                "raw_message": raw_msg,
+                            }
+                            new_incidents.append(inc_item)
+                            await ha_client.send_notification(
+                                title=f"⚠️ Omada Kabel-Fehler: {dev_name} Port {port_id}",
+                                message=f"{crc_sev}: {rec}",
+                                severity=crc_sev,
+                                action=rec,
+                            )
+
+                    if crc_errors is not None:
+                        self.prev_port_crc[crc_key] = int(crc_errors)
 
                     # Update port history
                     if link_speed is not None:
@@ -1821,6 +2009,106 @@ class OmadaClient:
                             severity="CRITICAL",
                             action=rec,
                         )
+
+        # Ingest Controller Events & stream to syslog_messages
+        try:
+            events = await self.get_controller_events(limit=40)
+            for ev in events:
+                ev_id = str(ev.get("id") or ev.get("time") or hash(str(ev)))
+                if ev_id in self.seen_event_ids:
+                    continue
+                self.seen_event_ids.add(ev_id)
+                if len(self.seen_event_ids) > 2000:
+                    self.seen_event_ids = set(list(self.seen_event_ids)[-1000:])
+
+                ev_msg = ev.get("msg") or ev.get("content") or ev.get("text") or str(ev)
+                ev_source = ev.get("devName") or ev.get("device") or "Omada Controller"
+                ev_mac = ev.get("mac") or ev.get("devMac") or "CONTROLLER"
+                ev_ip = ev.get("ip") or self.cfg.omada_host
+
+                ev_lower = ev_msg.lower()
+                if "radar" in ev_lower or "dfs" in ev_lower:
+                    ev_type = "RADAR_DFS"
+                    ev_lvl = "WARN"
+                elif any(k in ev_lower for k in ("roam", "roaming", "fast bss")):
+                    ev_type = "ROAMING"
+                    ev_lvl = "INFO"
+                elif any(k in ev_lower for k in ("connect", "disconnect", "wlan", "wifi")):
+                    ev_type = "WIFI"
+                    ev_lvl = "INFO"
+                elif any(k in ev_lower for k in ("dhcp", "ip")):
+                    ev_type = "DHCP"
+                    ev_lvl = "INFO"
+                elif any(k in ev_lower for k in ("port", "link")):
+                    ev_type = "PORT_LINK"
+                    ev_lvl = "WARN" if "down" in ev_lower else "INFO"
+                else:
+                    ev_type = "CONTROLLER_EVENT"
+                    ev_lvl = "WARN" if any(k in ev_lower for k in ("fail", "err", "reject", "loss")) else "INFO"
+
+                await db_mgr.record_syslog(
+                    source_ip=ev_ip,
+                    device_name=ev_source,
+                    device_mac=ev_mac,
+                    message=f"[Controller Event] {ev_msg}",
+                    log_type=ev_type,
+                    log_level=ev_lvl,
+                )
+
+                # Heuristic: DFS Radar detection
+                if "radar" in ev_lower or "dfs" in ev_lower:
+                    rec = (
+                        f"WLAN 5 GHz DFS Radarimpuls erkannt ({ev_source}). "
+                        f"Der Access Point hat den Funkkanal automatisch gewechselt, um Störungen mit Wetterradar zu vermeiden."
+                    )
+                    raw_msg = f"Controller DFS/Radar event: {ev_msg}"
+                    inc_id = await db_mgr.record_incident(
+                        source_ip=ev_ip,
+                        device_name=ev_source,
+                        device_mac=ev_mac,
+                        severity="WARNING",
+                        category="RADAR_DFS",
+                        raw_message=raw_msg,
+                        action_recommendation=rec,
+                    )
+                    if inc_id:
+                        new_incidents.append({
+                            "id": inc_id,
+                            "device_name": ev_source,
+                            "severity": "WARNING",
+                            "category": "RADAR_DFS",
+                            "action_recommendation": rec,
+                            "raw_message": raw_msg,
+                        })
+                        await ha_client.send_notification(
+                            title=f"📡 Omada DFS Radar: {ev_source}",
+                            message=f"Warnung: {rec}",
+                            severity="WARNING",
+                            action=rec,
+                        )
+        except Exception as e:
+            logger.debug(f"Controller events polling error: {e}")
+
+        # Ingest Connected Clients into inventory
+        try:
+            clients = await self.get_clients(limit=250)
+            for c in clients:
+                c_mac = c.get("mac")
+                c_ip = c.get("ip")
+                c_name = c.get("name") or c.get("hostname")
+                c_vendor = c.get("vendor") or c.get("manufacturer")
+                c_uptime = c.get("uptime") or 0
+                if c_mac or c_ip:
+                    await db_mgr.upsert_device(
+                        mac=c_mac,
+                        ip=c_ip,
+                        suggested_name=c_name,
+                        device_type="client",
+                        vendor=c_vendor,
+                        uptime=c_uptime,
+                    )
+        except Exception as e:
+            logger.debug(f"Clients polling error: {e}")
 
         self.last_poll_status = {
             "success": True,
@@ -2150,7 +2438,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.6.1",
+    version="1.7.0",
     lifespan=lifespan,
 )
 
@@ -2507,6 +2795,54 @@ async def api_rescan_devices():
     discovered = await db_mgr.backfill_devices_from_syslogs()
     counts = await db_mgr.get_device_counts()
     return {"success": True, "devices_discovered": discovered, "counts": counts}
+
+
+@app.get("/api/devices/{device_id}")
+async def api_get_device_detail(device_id: int):
+    dev = await db_mgr.get_device_by_id(device_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    # Parse JSON fields if available
+    ports = []
+    if dev.get("ports_json"):
+        try:
+            ports = json.loads(dev["ports_json"])
+        except Exception:
+            ports = []
+
+    wireless = {}
+    if dev.get("wireless_json"):
+        try:
+            wireless = json.loads(dev["wireless_json"])
+        except Exception:
+            wireless = {}
+
+    wan = {}
+    if dev.get("wan_json"):
+        try:
+            wan = json.loads(dev["wan_json"])
+        except Exception:
+            wan = {}
+
+    return {
+        "device": dev,
+        "ports": ports,
+        "wireless": wireless,
+        "wan": wan,
+    }
+
+
+@app.get("/api/clients")
+async def api_get_clients():
+    clients = await omada_client.get_clients(limit=250)
+    return {"clients": clients, "count": len(clients)}
+
+
+@app.get("/api/controller-events")
+async def api_get_controller_events(limit: int = Query(50, ge=1, le=200)):
+    events = await omada_client.get_controller_events(limit=limit)
+    return {"events": events, "count": len(events)}
 
 
 # ---------------------------------------------------------------------------
@@ -3201,6 +3537,107 @@ async def dashboard(request: Request):
       </div>
     </div>
 
+    <!-- Device Detail Modal -->
+    <div id="device-detail-modal" class="modal-backdrop">
+      <div class="modal-box" style="max-width: 850px; width: 95%;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid var(--card-border); padding-bottom:12px;">
+          <h3 style="font-size:1.2rem; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+            <span>🔍</span> <span id="detail-modal-title">Geräte-Details &amp; Hardware-Diagnose</span>
+          </h3>
+          <button onclick="closeDeviceDetailModal()" style="background:none; border:none; color:var(--text-muted); font-size:1.5rem; cursor:pointer;">&times;</button>
+        </div>
+
+        <!-- Device Header Card -->
+        <div style="background:rgba(15,23,42,0.6); border:1px solid var(--card-border); border-radius:10px; padding:16px; margin-bottom:18px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px; margin-bottom:12px;">
+            <div>
+              <div style="display:flex; align-items:center; gap:10px;">
+                <h2 id="detail-dev-name" style="font-size:1.3rem; font-weight:700; color:#f8fafc;">-</h2>
+                <span id="detail-dev-type-badge" class="badge badge-info">-</span>
+                <span id="detail-dev-upgrade-badge" class="badge badge-warn" style="display:none;">Update verfügbar!</span>
+              </div>
+              <div style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">
+                Modell: <strong id="detail-dev-model" style="color:var(--text-main);">-</strong> &bull;
+                Firmware: <span id="detail-dev-fw" style="color:var(--text-main); font-family:monospace;">-</span> &bull;
+                Hersteller: <span id="detail-dev-vendor" style="color:var(--text-main);">-</span>
+              </div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:0.8rem; color:var(--text-muted);">Status</div>
+              <div id="detail-dev-status" style="font-size:0.95rem; font-weight:600; color:#10b981;">Online</div>
+            </div>
+          </div>
+
+          <!-- Quick Metrics Bar -->
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:12px; border-top:1px solid rgba(255,255,255,0.08); padding-top:12px; font-size:0.85rem;">
+            <div>
+              <span style="color:var(--text-muted); display:block; font-size:0.75rem;">IP-ADRESSE</span>
+              <strong id="detail-dev-ip" style="font-family:monospace;">-</strong>
+            </div>
+            <div>
+              <span style="color:var(--text-muted); display:block; font-size:0.75rem;">MAC-ADRESSE</span>
+              <strong id="detail-dev-mac" style="font-family:monospace;">-</strong>
+            </div>
+            <div>
+              <span style="color:var(--text-muted); display:block; font-size:0.75rem;">UPTIME</span>
+              <strong id="detail-dev-uptime">-</strong>
+            </div>
+            <div>
+              <span style="color:var(--text-muted); display:block; font-size:0.75rem;">CPU / RAM</span>
+              <strong id="detail-dev-cpu-ram">-</strong>
+            </div>
+            <div>
+              <span style="color:var(--text-muted); display:block; font-size:0.75rem;">VERBUNDENE CLIENTS</span>
+              <strong id="detail-dev-clients">-</strong>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dynamic Content: Switch Ports or AP Radios or WAN -->
+        <div id="detail-section-ports" style="display:none; margin-bottom:18px;">
+          <h4 style="font-size:0.95rem; color:#f8fafc; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>🔀</span> Switch-Port Matrix &amp; Kabeldiagnose
+          </h4>
+          <div class="table-responsive" style="max-height:280px; overflow-y:auto;">
+            <table style="font-size:0.82rem;">
+              <thead>
+                <tr>
+                  <th style="width:60px;">Port</th>
+                  <th>Name / Profil</th>
+                  <th>Link-Speed</th>
+                  <th>PoE</th>
+                  <th>CRC / Rx-Fehler</th>
+                  <th>Tx/Rx Daten</th>
+                </tr>
+              </thead>
+              <tbody id="detail-ports-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="detail-section-wireless" style="display:none; margin-bottom:18px;">
+          <h4 style="font-size:0.95rem; color:#f8fafc; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>📡</span> Funkmodul-Status &amp; Frequenzbänder
+          </h4>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px;" id="detail-wireless-cards">
+          </div>
+        </div>
+
+        <div id="detail-section-wan" style="display:none; margin-bottom:18px;">
+          <h4 style="font-size:0.95rem; color:#f8fafc; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+            <span>🌐</span> WAN &amp; Gateway-Konfiguration
+          </h4>
+          <div id="detail-wan-content" style="background:rgba(15,23,42,0.6); border:1px solid var(--card-border); border-radius:8px; padding:12px; font-size:0.85rem; font-family:monospace;">
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <button class="btn btn-secondary" type="button" onclick="filterSyslogsFromModal()">📜 Logs dieses Geräts</button>
+          <button class="btn btn-primary" type="button" onclick="closeDeviceDetailModal()">Schließen</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Device Rename Modal -->
     <div id="rename-device-modal" class="modal-backdrop">
       <div class="modal-box">
@@ -3399,11 +3836,14 @@ async def dashboard(request: Request):
             <!-- Log Type Dropdown -->
             <select id="syslog-type" onchange="loadSyslogs()">
               <option value="">Alle Protokoll-Typen</option>
-              <option value="WIFI">WLAN &amp; Roaming (WIFI)</option>
+              <option value="WIFI">WLAN &amp; Clients (WIFI)</option>
+              <option value="ROAMING">WLAN-Roaming (ROAMING)</option>
+              <option value="RADAR_DFS">DFS / Radarimpuls (RADAR_DFS)</option>
               <option value="PORT_LINK">Port &amp; Link-Drop (PORT_LINK)</option>
               <option value="POE">PoE Stromversorgung (POE)</option>
               <option value="SYSTEM">System &amp; Reboot (SYSTEM)</option>
               <option value="DHCP">DHCP &amp; IP (DHCP)</option>
+              <option value="CONTROLLER_EVENT">Controller-Events (CONTROLLER_EVENT)</option>
               <option value="GENERAL">Allgemein (GENERAL)</option>
             </select>
 
@@ -3484,7 +3924,7 @@ async def dashboard(request: Request):
       </div>
     </div>
 
-    <!-- TAB 3: Virtual Devices View -->
+    <!-- TAB 3: Virtual Devices & Clients View -->
     <div id="view-devices" style="display:none;">
       <!-- Stat Cards Grid -->
       <div class="status-grid" style="margin-bottom:20px;">
@@ -3514,64 +3954,128 @@ async def dashboard(request: Request):
         </div>
         <div class="card">
           <div class="status-card-header">
-            <span>WLAN &amp; LAN Clients</span>
+            <span>WLAN-Clients Aktiv</span>
             <span>💻</span>
           </div>
           <div class="status-card-value" id="card-dev-clients">0</div>
-          <div class="status-card-desc">Endgeräte (DHCP &amp; WLAN)</div>
+          <div class="status-card-desc">Mit Access Points verbunden</div>
         </div>
       </div>
 
-      <!-- Filter Toolbar -->
-      <div class="card" style="margin-bottom:20px; padding:16px;">
-        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
-          <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
-            <input type="text" id="device-search" placeholder="🔍 Suche nach Name, MAC oder IP..." 
-                   style="min-width:220px; flex:1;" oninput="debounce(loadDevices, 350)()" />
+      <!-- Sub-Navigation for Tab 3 -->
+      <div style="display:flex; gap:10px; margin-bottom:18px; align-items:center; flex-wrap:wrap;">
+        <button id="subtab-btn-infra" class="btn btn-primary" onclick="switchDeviceSubTab('infra')">
+          🖥️ Infrastruktur-Geräte (Switches, APs, Router)
+        </button>
+        <button id="subtab-btn-clients" class="btn btn-secondary" onclick="switchDeviceSubTab('clients')">
+          📱 WLAN-Clients &amp; Signalstärke (RSSI)
+        </button>
+      </div>
 
-            <select id="device-filter-type" onchange="loadDevices()">
-              <option value="">Alle Gerätetypen</option>
-              <option value="router">🌐 Router &amp; Gateway</option>
-              <option value="switch">🔀 Switches</option>
-              <option value="ap">📡 Access Points (APs)</option>
-              <option value="client">💻 Clients &amp; Endgeräte</option>
-            </select>
+      <!-- SUBVIEW 1: Infrastructure Devices -->
+      <div id="subview-infra">
+        <div class="card" style="margin-bottom:20px; padding:16px;">
+          <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+              <input type="text" id="device-search" placeholder="🔍 Suche nach Name, MAC, IP oder Modell..." 
+                     style="min-width:220px; flex:1;" oninput="debounce(loadDevices, 350)()" />
 
-            <label style="display:inline-flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-muted); cursor:pointer;">
-              <input type="checkbox" id="device-filter-suggestions" onchange="loadDevices()" />
-              Nur mit Vorschlägen
-            </label>
+              <select id="device-filter-type" onchange="loadDevices()">
+                <option value="">Alle Infrastruktur-Typen</option>
+                <option value="router">🌐 Router &amp; Gateway</option>
+                <option value="switch">🔀 Switches</option>
+                <option value="ap">📡 Access Points (APs)</option>
+              </select>
+
+              <label style="display:inline-flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-muted); cursor:pointer;">
+                <input type="checkbox" id="device-filter-suggestions" onchange="loadDevices()" />
+                Nur mit Vorschlägen
+              </label>
+            </div>
+
+            <div style="display:flex; gap:8px;">
+              <button class="btn btn-secondary" onclick="rescanDevices()" id="btn-rescan-devs" title="Durchsucht alle empfangenen Syslogs nach neuen MACs und Hostnamen">
+                🔄 Syslogs nach Geräten scannen
+              </button>
+            </div>
           </div>
+        </div>
 
-          <div style="display:flex; gap:8px;">
-            <button class="btn btn-secondary" onclick="rescanDevices()" id="btn-rescan-devs" title="Durchsucht alle empfangenen Syslogs nach neuen MACs und Hostnamen">
-              🔄 Syslogs nach Geräten scannen
-            </button>
-          </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th style="min-width:170px;">Gerätename</th>
+                <th style="min-width:180px;">Modell &amp; Firmware</th>
+                <th style="width:110px;">Typ</th>
+                <th style="width:110px;">Uptime</th>
+                <th style="width:120px;">CPU / RAM</th>
+                <th style="min-width:160px;">MAC / IP</th>
+                <th style="width:85px;">Syslogs</th>
+                <th style="width:170px; text-align:center;">Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="devices-tbody">
+              <tr>
+                <td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Lade Infrastruktur-Geräte...</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
-      <!-- Devices Table -->
-      <div class="table-responsive">
-        <table>
-          <thead>
-            <tr>
-              <th style="min-width:180px;">Gerätename</th>
-              <th style="min-width:200px;">Namensvorschlag</th>
-              <th style="width:120px;">Typ</th>
-              <th style="min-width:170px;">MAC-Adresse</th>
-              <th style="min-width:130px;">IP-Adresse</th>
-              <th style="width:90px;">Syslogs</th>
-              <th style="min-width:140px;">Zuletzt gesehen</th>
-              <th style="width:130px; text-align:center;">Aktionen</th>
-            </tr>
-          </thead>
-          <tbody id="devices-tbody">
-            <tr>
-              <td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Lade Geräte...</td>
-            </tr>
-          </tbody>
-        </table>
+      <!-- SUBVIEW 2: WLAN Clients -->
+      <div id="subview-clients" style="display:none;">
+        <div class="card" style="margin-bottom:20px; padding:16px;">
+          <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+              <input type="text" id="client-search" placeholder="🔍 Suche nach Client-Name, IP, MAC, SSID..." 
+                     style="min-width:240px; flex:1;" oninput="debounce(renderClientsTable, 300)()" />
+              
+              <select id="client-filter-band" onchange="renderClientsTable()">
+                <option value="">Alle Bänder</option>
+                <option value="2.4">2.4 GHz</option>
+                <option value="5">5 GHz</option>
+                <option value="6">6 GHz</option>
+              </select>
+
+              <select id="client-filter-signal" onchange="renderClientsTable()">
+                <option value="">Alle Signalstärken</option>
+                <option value="good">Ausgezeichnet (&ge; -65 dBm)</option>
+                <option value="medium">Mittel (-66 bis -80 dBm)</option>
+                <option value="weak">Schwach (&lt; -80 dBm)</option>
+              </select>
+            </div>
+
+            <div style="display:flex; gap:8px;">
+              <button class="btn btn-secondary" onclick="loadClients()" id="btn-refresh-clients">
+                🔄 Clients aktualisieren
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th style="min-width:170px;">Client-Name</th>
+                <th style="min-width:160px;">IP / MAC-Adresse</th>
+                <th style="min-width:160px;">Access Point &amp; SSID</th>
+                <th style="width:110px;">Band / Kanal</th>
+                <th style="min-width:140px;">Signalstärke (RSSI)</th>
+                <th style="width:120px;">Übertragungsrate</th>
+                <th style="width:110px;">Uptime</th>
+                <th style="width:120px; text-align:center;">Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="clients-tbody">
+              <tr>
+                <td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Lade WLAN-Clients...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -4200,6 +4704,316 @@ async def dashboard(request: Request):
         .replace(/'/g, "&#039;");
     }}
 
+    function formatUptime(seconds) {{
+      if (!seconds || seconds <= 0) return "-";
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (d > 0) return `${{d}}T ${{h}}h`;
+      if (h > 0) return `${{h}}h ${{m}}m`;
+      return `${{m}}m`;
+    }}
+
+    function formatSpeed(speed) {{
+      switch (parseInt(speed, 10)) {{
+        case 0: return '<span class="badge badge-gray">Down</span>';
+        case 1: return '<span class="badge badge-warn">10M</span>';
+        case 2: return '<span class="badge badge-warn">100M</span>';
+        case 3: return '<span class="badge badge-ok">1G</span>';
+        case 4: return '<span class="badge badge-ok">2.5G</span>';
+        case 5: return '<span class="badge badge-ok">10G</span>';
+        default: return '<span class="badge badge-gray">-</span>';
+      }}
+    }}
+
+    function formatBytes(bytes) {{
+      if (!bytes || bytes <= 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
+    }}
+
+    // Device Detail Modal Logic
+    let currentDetailDevice = null;
+
+    async function openDeviceDetailModal(deviceId) {{
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices/${{deviceId}}`);
+        if (!res.ok) {{
+          alert("Gerät konnte nicht geladen werden.");
+          return;
+        }}
+        const data = await res.json();
+        const d = data.device || {{}};
+        currentDetailDevice = d;
+
+        document.getElementById("detail-modal-title").innerText = `${{d.custom_name || d.suggested_name || 'Geräte'}}-Details`;
+        document.getElementById("detail-dev-name").innerText = d.custom_name || d.suggested_name || "Unbenanntes Gerät";
+        document.getElementById("detail-dev-model").innerText = d.model || "TP-Link Device";
+        document.getElementById("detail-dev-fw").innerText = d.firmware || "Unbekannt";
+        document.getElementById("detail-dev-vendor").innerText = d.vendor || "TP-Link";
+        document.getElementById("detail-dev-status").innerText = d.status_text || "Online";
+        document.getElementById("detail-dev-ip").innerText = d.ip || "-";
+        document.getElementById("detail-dev-mac").innerText = d.mac || "-";
+        document.getElementById("detail-dev-uptime").innerText = formatUptime(d.uptime);
+        
+        const cpuStr = (d.cpu_util !== null && d.cpu_util !== undefined) ? `${{d.cpu_util}}%` : "-";
+        const memStr = (d.mem_util !== null && d.mem_util !== undefined) ? `${{d.mem_util}}%` : "-";
+        document.getElementById("detail-dev-cpu-ram").innerText = `${{cpuStr}} / ${{memStr}}`;
+        document.getElementById("detail-dev-clients").innerText = d.client_count || 0;
+
+        const typeBadge = document.getElementById("detail-dev-type-badge");
+        typeBadge.innerText = (d.device_type || 'client').toUpperCase();
+        if (d.device_type === "router") typeBadge.className = "badge badge-crit";
+        else if (d.device_type === "switch") typeBadge.className = "badge badge-cat";
+        else if (d.device_type === "ap") typeBadge.className = "badge badge-warn";
+        else typeBadge.className = "badge badge-gray";
+
+        const upBadge = document.getElementById("detail-dev-upgrade-badge");
+        upBadge.style.display = d.need_upgrade ? "inline-block" : "none";
+
+        // Section: Switch Ports
+        const secPorts = document.getElementById("detail-section-ports");
+        const tbodyPorts = document.getElementById("detail-ports-tbody");
+        if (d.device_type === "switch" && data.ports && data.ports.length > 0) {{
+          secPorts.style.display = "block";
+          tbodyPorts.innerHTML = data.ports.map(p => {{
+            const pId = p.port || p.portId || p.id || "-";
+            const pName = p.name || p.profileName || `Port ${{pId}}`;
+            const crc = p.rxCrcErrors || p.crcErrorPackets || p.crcErrors || p.rxErrors || 0;
+            const crcBadge = crc > 0 
+              ? `<span class="badge badge-crit" style="font-weight:700;">⚠️ ${{crc}} CRC-Fehler</span>`
+              : `<span style="color:#10b981; font-size:0.75rem;">✓ 0 Fehler</span>`;
+            const poeWatt = (p.poePower || p.power) ? `${{parseFloat(p.poePower || p.power).toFixed(1)}} W` : "-";
+            const rxBytes = p.rxBytes ? formatBytes(p.rxBytes) : "-";
+            const txBytes = p.txBytes ? formatBytes(p.txBytes) : "-";
+
+            return `
+              <tr>
+                <td><strong>#${{pId}}</strong></td>
+                <td>${{escapeHtml(pName)}}</td>
+                <td>${{formatSpeed(p.linkSpeed)}}</td>
+                <td>${{poeWatt}}</td>
+                <td>${{crcBadge}}</td>
+                <td style="font-family:monospace; font-size:0.75rem;">Rx: ${{rxBytes}} | Tx: ${{txBytes}}</td>
+              </tr>
+            `;
+          }}).join("");
+        }} else {{
+          secPorts.style.display = "none";
+        }}
+
+        // Section: AP Radios
+        const secWireless = document.getElementById("detail-section-wireless");
+        const cardsWireless = document.getElementById("detail-wireless-cards");
+        if ((d.device_type === "ap" || d.device_type === "eap") && data.wireless && (data.wireless.wp2g || data.wireless.wp5g)) {{
+          secWireless.style.display = "block";
+          const wp2g = data.wireless.wp2g || {{}};
+          const wp5g = data.wireless.wp5g || {{}};
+          const wp6g = data.wireless.wp6g || {{}};
+
+          let cardsHtml = "";
+          if (wp2g && (wp2g.channel || wp2g.txUtil !== undefined)) {{
+            const chUtil = (wp2g.txUtil || 0) + (wp2g.rxUtil || 0) || wp2g.channelUtil || 0;
+            cardsHtml += `
+              <div style="background:rgba(15,23,42,0.8); border:1px solid var(--card-border); border-radius:8px; padding:12px;">
+                <div style="font-weight:700; color:var(--accent-blue); margin-bottom:6px;">2.4 GHz Frequenzband</div>
+                <div>Kanal: <strong>${{wp2g.channel || 'Auto'}}</strong></div>
+                <div>Auslastung: <strong>${{chUtil}}%</strong></div>
+                <div>Sendeleistung: <strong>${{wp2g.txPower || '-'}} dBm</strong></div>
+              </div>
+            `;
+          }}
+          if (wp5g && (wp5g.channel || wp5g.txUtil !== undefined)) {{
+            const chUtil = (wp5g.txUtil || 0) + (wp5g.rxUtil || 0) || wp5g.channelUtil || 0;
+            const isDfs = (wp5g.channel >= 52 && wp5g.channel <= 144);
+            cardsHtml += `
+              <div style="background:rgba(15,23,42,0.8); border:1px solid var(--card-border); border-radius:8px; padding:12px;">
+                <div style="font-weight:700; color:var(--accent-cyan); margin-bottom:6px;">5 GHz Frequenzband</div>
+                <div>Kanal: <strong>${{wp5g.channel || 'Auto'}}</strong> ${{isDfs ? '<span class="badge badge-warn" style="font-size:0.65rem;">DFS</span>' : ''}}</div>
+                <div>Auslastung: <strong>${{chUtil}}%</strong></div>
+                <div>Sendeleistung: <strong>${{wp5g.txPower || '-'}} dBm</strong></div>
+              </div>
+            `;
+          }}
+          if (wp6g && wp6g.channel) {{
+            cardsHtml += `
+              <div style="background:rgba(15,23,42,0.8); border:1px solid var(--card-border); border-radius:8px; padding:12px;">
+                <div style="font-weight:700; color:#818cf8; margin-bottom:6px;">6 GHz (Wi-Fi 6E/7)</div>
+                <div>Kanal: <strong>${{wp6g.channel}}</strong></div>
+              </div>
+            `;
+          }}
+          cardsWireless.innerHTML = cardsHtml;
+        }} else {{
+          secWireless.style.display = "none";
+        }}
+
+        // Section: Gateway WAN
+        const secWan = document.getElementById("detail-section-wan");
+        const contentWan = document.getElementById("detail-wan-content");
+        if (d.device_type === "router" && data.wan && Object.keys(data.wan).length > 0) {{
+          secWan.style.display = "block";
+          const wan = data.wan;
+          contentWan.innerHTML = `
+            <div>WAN IP: <strong>${{wan.ip || wan.ipv4 || d.ip || '-'}}</strong></div>
+            <div>Gateway: <strong>${{wan.gateway || '-'}}</strong></div>
+            <div>DNS-Server: <strong>${{(wan.priDns || '') + (wan.sndDns ? ', ' + wan.sndDns : '') || '-'}}</strong></div>
+            <div>Link-Status: <strong>${{wan.linkStatus ? 'Up (Verbunden)' : 'Aktiv'}}</strong></div>
+          `;
+        }} else {{
+          secWan.style.display = "none";
+        }}
+
+        document.getElementById("device-detail-modal").style.display = "flex";
+      }} catch (err) {{
+        alert("Fehler beim Öffnen der Geräte-Details: " + err.message);
+      }}
+    }}
+
+    function closeDeviceDetailModal() {{
+      document.getElementById("device-detail-modal").style.display = "none";
+    }}
+
+    function filterSyslogsFromModal() {{
+      if (!currentDetailDevice) return;
+      closeDeviceDetailModal();
+      filterSyslogByDevice(currentDetailDevice.ip || currentDetailDevice.mac);
+    }}
+
+    // Sub-Navigation for Tab 3
+    let currentDeviceSubTab = 'infra';
+    let cachedClientsList = [];
+
+    function switchDeviceSubTab(sub) {{
+      currentDeviceSubTab = sub;
+      const isInfra = (sub === 'infra');
+      document.getElementById("subview-infra").style.display = isInfra ? 'block' : 'none';
+      document.getElementById("subview-clients").style.display = isInfra ? 'none' : 'block';
+
+      document.getElementById("subtab-btn-infra").className = isInfra ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById("subtab-btn-clients").className = isInfra ? 'btn btn-secondary' : 'btn btn-primary';
+
+      if (!isInfra) {{
+        loadClients();
+      }} else {{
+        loadDevices();
+      }}
+    }}
+
+    async function loadClients() {{
+      const btn = document.getElementById("btn-refresh-clients");
+      if (btn) btn.innerText = "⏳ Lade Clients...";
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/clients`);
+        if (!res.ok) return;
+        const data = await res.json();
+        cachedClientsList = data.clients || [];
+        document.getElementById("card-dev-clients").innerText = cachedClientsList.length;
+        renderClientsTable();
+      }} catch (err) {{
+        console.error("Failed to load clients:", err);
+      }} finally {{
+        if (btn) btn.innerText = "🔄 Clients aktualisieren";
+      }}
+    }}
+
+    function renderClientsTable() {{
+      const search = (document.getElementById("client-search") ? document.getElementById("client-search").value : "").trim().toLowerCase();
+      const bandFilter = document.getElementById("client-filter-band") ? document.getElementById("client-filter-band").value : "";
+      const signalFilter = document.getElementById("client-filter-signal") ? document.getElementById("client-filter-signal").value : "";
+      const tbody = document.getElementById("clients-tbody");
+      if (!tbody) return;
+
+      const filtered = cachedClientsList.filter(c => {{
+        const name = (c.name || c.hostname || "").toLowerCase();
+        const ip = (c.ip || "").toLowerCase();
+        const mac = (c.mac || "").toLowerCase();
+        const ap = (c.apName || "").toLowerCase();
+        const ssid = (c.ssid || "").toLowerCase();
+
+        if (search && !(name.includes(search) || ip.includes(search) || mac.includes(search) || ap.includes(search) || ssid.includes(search))) {{
+          return false;
+        }}
+
+        const radioId = c.radioId;
+        const mode = String(c.wifiMode || "").toLowerCase();
+        const band = (radioId === 0 || mode.includes("2.4") || mode.includes("11g") || mode.includes("11b")) ? "2.4" : (radioId === 2 ? "6" : "5");
+        if (bandFilter && band !== bandFilter) return false;
+
+        const rssi = parseInt(c.rssi || c.signalLevel || -100, 10);
+        if (signalFilter === "good" && rssi < -65) return false;
+        if (signalFilter === "medium" && (rssi >= -65 || rssi < -80)) return false;
+        if (signalFilter === "weak" && rssi >= -80) return false;
+
+        return true;
+      }});
+
+      if (filtered.length === 0) {{
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Keine WLAN-Clients mit diesen Filtern gefunden.</td></tr>`;
+        return;
+      }}
+
+      tbody.innerHTML = filtered.map(c => {{
+        const name = c.name || c.hostname || "Unbekannter Client";
+        const ip = c.ip || "-";
+        const mac = c.mac || "-";
+        const apName = c.apName || "Access Point";
+        const ssid = c.ssid || "WLAN";
+        const radioId = c.radioId;
+        const mode = String(c.wifiMode || "").toLowerCase();
+        const band = (radioId === 0 || mode.includes("2.4") || mode.includes("11g") || mode.includes("11b")) ? "2.4 GHz" : (radioId === 2 ? "6 GHz" : "5 GHz");
+        const channel = c.channel ? `Kanal ${{c.channel}}` : "";
+        const rssi = parseInt(c.rssi || c.signalLevel || 0, 10);
+
+        let signalBadge = "";
+        if (rssi >= -65 && rssi < 0) {{
+          signalBadge = `<span class="badge badge-ok" style="font-weight:600;">🟢 ${{rssi}} dBm (Ausgezeichnet)</span>`;
+        }} else if (rssi >= -72 && rssi < -65) {{
+          signalBadge = `<span class="badge" style="background:rgba(132,204,22,0.2); color:#a3e635; border:1px solid #84cc16;">🟡 ${{rssi}} dBm (Gut)</span>`;
+        }} else if (rssi >= -80 && rssi < -72) {{
+          signalBadge = `<span class="badge badge-warn" style="font-weight:600;">🟠 ${{rssi}} dBm (Mittel)</span>`;
+        }} else if (rssi < -80 && rssi > -120) {{
+          signalBadge = `<span class="badge badge-crit" style="font-weight:700;">🔴 ${{rssi}} dBm (Schwach)</span>`;
+        }} else {{
+          signalBadge = `<span class="badge badge-gray">-</span>`;
+        }}
+
+        const txRate = c.txRate ? `${{c.txRate}}M` : "-";
+        const rxRate = c.rxRate ? `${{c.rxRate}}M` : "-";
+        const uptimeStr = formatUptime(c.uptime);
+
+        return `
+          <tr>
+            <td data-label="Client-Name">
+              <strong>${{escapeHtml(name)}}</strong>
+              ${{c.vendor ? `<div style="font-size:0.75rem; color:var(--text-muted);">${{escapeHtml(c.vendor)}}</div>` : ''}}
+            </td>
+            <td data-label="IP / MAC" style="font-family:monospace; font-size:0.8rem;">
+              <div>${{escapeHtml(ip)}}</div>
+              <div style="color:var(--text-muted); font-size:0.75rem;">${{escapeHtml(mac)}}</div>
+            </td>
+            <td data-label="Access Point &amp; SSID">
+              <strong>${{escapeHtml(apName)}}</strong>
+              <div style="font-size:0.75rem; color:var(--accent-blue);">${{escapeHtml(ssid)}}</div>
+            </td>
+            <td data-label="Band / Kanal">
+              <span class="badge badge-cat">${{band}}</span>
+              <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">${{channel}}</div>
+            </td>
+            <td data-label="Signalstärke">${{signalBadge}}</td>
+            <td data-label="Übertragungsrate" style="font-family:monospace; font-size:0.8rem;">
+              ↓ ${{rxRate}} / ↑ ${{txRate}}
+            </td>
+            <td data-label="Uptime" style="font-size:0.8rem; color:var(--text-muted);">${{uptimeStr}}</td>
+            <td data-label="Aktionen" style="text-align:center;">
+              <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="filterSyslogByDevice('${{ip !== '-' ? ip : mac}}')" title="Logs dieses Clients anzeigen">📜 Logs</button>
+            </td>
+          </tr>
+        `;
+      }}).join("");
+    }}
+
     // Virtual Devices Management
     async function loadDevices() {{
       const search = document.getElementById("device-search") ? document.getElementById("device-search").value.trim() : "";
@@ -4223,7 +5037,6 @@ async def dashboard(request: Request):
         document.getElementById("card-dev-suggestions").innerText = counts.suggestions || 0;
         document.getElementById("card-dev-infra").innerText = (counts.routers || 0) + (counts.switches || 0) + (counts.aps || 0);
         document.getElementById("card-dev-infra-desc").innerText = `${{counts.routers || 0}} Router, ${{counts.switches || 0}} Switches, ${{counts.aps || 0}} APs`;
-        document.getElementById("card-dev-clients").innerText = counts.clients || 0;
 
         const sugBadge = document.getElementById("tab-badge-suggestions");
         if (sugBadge) {{
@@ -4235,32 +5048,34 @@ async def dashboard(request: Request):
           }}
         }}
 
+        // Filter for infrastructure if in infra subview and no specific type chosen
+        const visibleDevs = (currentDeviceSubTab === 'infra' && !devType)
+          ? devs.filter(d => d.device_type === 'router' || d.device_type === 'switch' || d.device_type === 'ap')
+          : devs;
+
         const tbody = document.getElementById("devices-tbody");
-        if (devs.length === 0) {{
-          tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Keine Geräte mit diesen Filtern gefunden.</td></tr>`;
+        if (visibleDevs.length === 0) {{
+          tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Keine Infrastruktur-Geräte mit diesen Filtern gefunden.</td></tr>`;
           return;
         }}
 
-        tbody.innerHTML = devs.map(d => {{
+        tbody.innerHTML = visibleDevs.map(d => {{
           let typeIcon = "💻";
           let typeBadge = "badge-gray";
           if (d.device_type === "router") {{ typeIcon = "🌐"; typeBadge = "badge-crit"; }}
           else if (d.device_type === "switch") {{ typeIcon = "🔀"; typeBadge = "badge-cat"; }}
           else if (d.device_type === "ap") {{ typeIcon = "📡"; typeBadge = "badge-warn"; }}
 
-          const displayName = d.custom_name || `<span style="color:var(--text-muted); font-style:italic;">Unbenannt</span>`;
+          const displayName = d.custom_name || d.suggested_name || `<span style="color:var(--text-muted); font-style:italic;">Unbenannt</span>`;
           const vendorStr = d.vendor ? `<span class="badge badge-cat" style="font-size:0.65rem; margin-left:4px;">${{escapeHtml(d.vendor)}}</span>` : "";
 
-          let suggestionHtml = `<span style="color:var(--text-muted); font-size:0.8rem;">-</span>`;
-          if (d.suggested_name) {{
-            suggestionHtml = `
-              <div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                <span class="badge badge-warn" style="font-size:0.75rem;">💡 ${{escapeHtml(d.suggested_name)}}</span>
-                <button class="btn btn-primary" style="padding:2px 8px; font-size:0.75rem;" onclick="acceptSuggestion(${{d.id}})" title="Vorschlag annehmen">✓ Annehmen</button>
-                <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.75rem;" onclick="rejectSuggestion(${{d.id}})" title="Vorschlag ablehnen">✕ Ablehnen</button>
-              </div>
-            `;
-          }}
+          const modelName = d.model || (d.device_type === 'router' ? 'Omada Gateway' : (d.device_type === 'switch' ? 'Omada Switch' : 'Omada AP'));
+          const fwStr = d.firmware ? `<span style="font-family:monospace; font-size:0.75rem; color:var(--text-muted);">${{escapeHtml(d.firmware)}}</span>` : '';
+          const upgPill = d.need_upgrade ? `<span class="badge badge-warn" style="font-size:0.65rem; margin-left:4px;">Update!</span>` : '';
+
+          const uptimeStr = formatUptime(d.uptime);
+          const cpuVal = (d.cpu_util !== null && d.cpu_util !== undefined) ? `${{d.cpu_util}}%` : '-';
+          const memVal = (d.mem_util !== null && d.mem_util !== undefined) ? `${{d.mem_util}}%` : '-';
 
           const safeCustom = encodeURIComponent(d.custom_name || "");
           const safeIp = encodeURIComponent(d.ip || "");
@@ -4276,15 +5091,22 @@ async def dashboard(request: Request):
                   <button class="copy-btn" style="padding:2px 6px;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Name bearbeiten">✏️</button>
                 </div>
               </td>
-              <td data-label="Namensvorschlag">${{suggestionHtml}}</td>
+              <td data-label="Modell &amp; Firmware">
+                <div><strong>${{escapeHtml(modelName)}}</strong> ${{upgPill}}</div>
+                <div>${{fwStr}}</div>
+              </td>
               <td data-label="Typ"><span class="badge ${{typeBadge}}">${{typeIcon}} ${{d.device_type || 'client'}}</span></td>
-              <td data-label="MAC-Adresse" style="font-family:monospace; font-size:0.82rem;">${{d.mac || '-'}} ${{vendorStr}}</td>
-              <td data-label="IP-Adresse" style="font-family:monospace; font-size:0.82rem;">${{d.ip || '-'}}</td>
+              <td data-label="Uptime" style="font-size:0.82rem; color:var(--text-muted); white-space:nowrap;">${{uptimeStr}}</td>
+              <td data-label="CPU / RAM" style="font-family:monospace; font-size:0.8rem;">${{cpuVal}} / ${{memVal}}</td>
+              <td data-label="MAC / IP" style="font-family:monospace; font-size:0.8rem;">
+                <div>${{d.ip || '-'}}</div>
+                <div style="color:var(--text-muted); font-size:0.75rem;">${{d.mac || '-'}}</div>
+              </td>
               <td data-label="Syslogs" style="font-size:0.85rem;"><span class="badge badge-gray">${{d.log_count || 1}} Logs</span></td>
-              <td data-label="Zuletzt gesehen" style="font-size:0.8rem; color:var(--text-muted); white-space:nowrap;">${{d.last_seen || ''}}</td>
               <td data-label="Aktionen" style="text-align:center;">
                 <div style="display:inline-flex; gap:6px;">
-                  <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')">✏️ Umbenennen</button>
+                  <button class="btn btn-primary" style="padding:4px 8px; font-size:0.75rem;" onclick="openDeviceDetailModal(${{d.id}})" title="Hardware-Details, Ports &amp; Diagnose öffnen">🔍 Details</button>
+                  <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')">✏️</button>
                   <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="filterSyslogByDevice('${{d.ip || d.mac || ''}}')" title="Logs dieses Geräts anzeigen">📜 Logs</button>
                 </div>
               </td>
@@ -4452,7 +5274,11 @@ async def dashboard(request: Request):
       }} else if (document.getElementById('view-syslogs').style.display !== 'none') {{
         loadSyslogs();
       }} else if (document.getElementById('view-devices').style.display !== 'none') {{
-        loadDevices();
+        if (currentDeviceSubTab === 'clients') {{
+          loadClients();
+        }} else {{
+          loadDevices();
+        }}
       }}
     }}, 10000);
 
@@ -4576,20 +5402,6 @@ async def dashboard(request: Request):
         btn.disabled = false;
       }}
     }}
-
-    // Initial load & cyclic refresh
-    loadStatus();
-    loadTrends();
-    loadIncidents();
-
-    setInterval(() => {{
-      loadStatus();
-      if (document.getElementById('view-advisor').style.display !== 'none') {{
-        loadIncidents();
-      }} else {{
-        loadSyslogs();
-      }}
-    }}, 10000);
   </script>
 </body>
 </html>

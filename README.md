@@ -21,6 +21,8 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
   2. **Inform Timeout / AP-Isolation**: Erkennt Verbindungsabbrüche zwischen Access Point und Controller (z. B. durch PoE-Spannungsabfall oder Switch-Port-Fehler).
   3. **WPA 4-Way Handshake Dropouts**: Filtert Disconnects mit `reason: 15` heraus und weist auf WPA3/PMF-Inkompatibilitäten hin.
   4. **2.4-GHz-Kanalüberlastung**: Alarmiert bei Kanal-Auslastung `> 80%` mit Optimierungshinweisen für Kanal- und Sendeleistung.
+  5. **Switch-Port Kabeldiagnose & CRC-Fehler (Heuristik 5)**: Überwacht `rxCrcErrors` und Übertragungsfehler pro Port, um Wackelkontakte, defekte Patchkabel oder EMV-Störungen zu erkennen, *bevor* die Verbindung abreißt.
+  6. **5 GHz DFS Radarimpuls-Erkennung**: Erkennt, wenn Access Points wegen Wetterradar automatisch den Kanal wechseln müssen (`RADAR_DFS`).
 - **Home Assistant Ingress Dark-Mode Dashboard**:
   - **Tab 1: Diagnose & Vorfälle**:
     - Übersichtlicher Gesundheitsstatus (Optimal / Eingeschränkt / Warnung / Kritisch).
@@ -30,13 +32,14 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
     - Vollständig responsives Mobile-Layout für Smartphones (Card-Darstellung für alle Tabellen, wischbare Tab-Leiste).
     - Trend-Analyse (Häufung nach Uhrzeit und am stärksten betroffenen Geräten).
     - Direkte Aktions-Buttons: *"Als behoben markieren"*, *"Alle beheben"*, *"CSV/JSON Export"* und manueller Scan-Trigger.
-  - **Tab 2: Syslog-Protokoll (Alle Logs)**:
-    - Vollständige Historie aller empfangenen Syslog-Meldungen, persistent gespeichert für $X$ Tage (`log_retention_days`).
-    - Feingranulare Filterung nach Volltextsuche, Protokoll-Typ (WIFI, PORT_LINK, POE, SYSTEM, DHCP), Level (CRITICAL, ERROR, WARN, INFO), Gerät / IP und Zeitfenster (1h, 24h, 7 Tage oder benutzerdefinierter Zeitraum).
+  - **Tab 2: Syslog-Protokoll (Alle Logs & Controller Events)**:
+    - Vollständige Historie aller empfangenen Syslog-Meldungen und Controller-Events, persistent gespeichert für $X$ Tage (`log_retention_days`).
+    - Feingranulare Filterung nach Volltextsuche, Protokoll-Typ (WIFI, ROAMING, RADAR_DFS, PORT_LINK, POE, SYSTEM, DHCP, CONTROLLER_EVENT), Level (CRITICAL, ERROR, WARN, INFO), Gerät / IP und Zeitfenster.
     - Direkter Klick auf beliebige Syslog-Meldung oder 📋-Button zum sofortigen Kopieren ins Clipboard (inkl. 'Alle kopieren'-Button, universalem Ingress-Fallback und Toast-Feedback) sowie separater CSV- und JSON-Export.
-  - **Tab 3: Virtuelle Geräte (Inventar & Namenserkennung)**:
-    - Automatische Erkennung aller Geräte aus Syslogs (Router, Switches, Access Points, DHCP & WLAN-Clients).
-    - OUI-Herstellererkennung (Apple, TP-Link, Espressif, Raspberry Pi, etc.).
+  - **Tab 3: Virtuelle Geräte & WLAN-Clients**:
+    - **Infrastruktur-Ansicht**: Detaillierte Tabelle aller Router, Switches und APs mit Modell, Firmware, Update-Status (`Update verfügbar!`), Uptime (`X Tage, Y Std.`), CPU/RAM-Auslastung und MAC/IP.
+    - **Interaktiver Detail-Dialog (`🔍 Details`)**: Vollständige Switch-Port-Matrix (Status, PoE-Watt, Rx/Tx, CRC-Fehler), AP-Funkkanalstatus (2.4G / 5G mit DFS / 6G) und Gateway-WAN-Status.
+    - **WLAN-Clients & Signalstärke-Ansicht**: Live-Übersicht aller verbundenen Clients mit Hostname, IP, MAC, Access Point, SSID, Frequenzband und farbcodierter RSSI-Signalstärke-Ampel (🟢 Ausgezeichnet, 🟡 Gut, 🟠 Mittel, 🔴 Schwach).
     - Automatische Namensvorschläge aus Syslogs (`💡 ER605`) mit Ein-Klick-Optionen **[✓ Annehmen]** und **[✕ Ablehnen]**.
     - Freie Benennung und Umbenennung jedes Geräts per Dialogfeld (✏️).
     - Schnellsprung "📜 Logs" zum sofortigen Filtern aller Meldungen des gewählten Geräts.
