@@ -31,6 +31,12 @@ Das Add-on korreliert zyklische REST-API-Telemetriedaten des Controllers mit Ech
     - Vollständige Historie aller empfangenen Syslog-Meldungen, persistent gespeichert für $X$ Tage (`log_retention_days`).
     - Feingranulare Filterung nach Volltextsuche, Protokoll-Typ (WIFI, PORT_LINK, POE, SYSTEM, DHCP), Level (CRITICAL, ERROR, WARN, INFO), Gerät / IP und Zeitfenster (1h, 24h, 7 Tage oder benutzerdefinierter Zeitraum).
     - Schneller Kopier-Button für jede Log-Zeile sowie separater CSV- und JSON-Export.
+  - **Tab 3: Virtuelle Geräte (Inventar & Namenserkennung)**:
+    - Automatische Erkennung aller Geräte aus Syslogs (Router, Switches, Access Points, DHCP & WLAN-Clients).
+    - OUI-Herstellererkennung (Apple, TP-Link, Espressif, Raspberry Pi, etc.).
+    - Automatische Namensvorschläge aus Syslogs (`💡 ER605`) mit Ein-Klick-Optionen **[✓ Annehmen]** und **[✕ Ablehnen]**.
+    - Freie Benennung und Umbenennung jedes Geräts per Dialogfeld (✏️).
+    - Schnellsprung "📜 Logs" zum sofortigen Filtern aller Meldungen des gewählten Geräts.
 - **Home Assistant Core Integration**:
   - Automatische Aktualisierung von `sensor.omada_advisor_status` und `sensor.omada_advisor_recommendation`.
   - Dynamische Dropdown-Auswahl der Notify-Entität (`notify.*`) direkt im Web-UI.

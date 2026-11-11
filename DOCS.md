@@ -99,6 +99,24 @@ CREATE TABLE syslog_messages (
 ```
 *Hinweis*: Alte Einträge werden automatisch nach Ablauf von `log_retention_days` (Standard: 7 Tage) zyklisch aus dieser Tabelle entfernt.
 
+### Tabelle `network_devices`:
+```sql
+CREATE TABLE network_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mac TEXT UNIQUE,
+    ip TEXT,
+    custom_name TEXT,
+    suggested_name TEXT,
+    suggested_rejected TEXT,
+    device_type TEXT DEFAULT 'client',
+    vendor TEXT,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    log_count INTEGER DEFAULT 1
+);
+```
+*Hinweis*: Hält alle virtuellen Geräte, vom Benutzer vergebene Namen (`custom_name`) sowie automatische Namensvorschläge (`suggested_name`) und abgelehnte Vorschläge (`suggested_rejected`).
+
 ---
 
 ## Home Assistant Ingress Dashboard

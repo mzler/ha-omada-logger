@@ -149,6 +149,135 @@ def classify_syslog(message: str) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Device Recognition & OUI Lookup Helpers
+# ---------------------------------------------------------------------------
+COMMON_OUIS = {
+    "00:0A:EB": "TP-Link",
+    "0C:EF:15": "TP-Link",
+    "20:23:51": "TP-Link",
+    "50:ED:3C": "TP-Link",
+    "5A:22:A0": "TP-Link",
+    "B0:4E:26": "TP-Link",
+    "E8:48:B8": "TP-Link",
+    "98:DA:C4": "TP-Link",
+    "04:17:B6": "Apple",
+    "A0:B7:65": "Apple",
+    "98:03:8E": "Apple",
+    "BC:D0:74": "Apple",
+    "F4:34:F0": "Apple",
+    "DC:A6:32": "Raspberry Pi",
+    "B8:27:EB": "Raspberry Pi",
+    "E4:5F:01": "Raspberry Pi",
+    "24:4C:E3": "Espressif",
+    "30:AE:A4": "Espressif",
+    "84:CC:A8": "Espressif",
+    "C4:4F:33": "Espressif",
+    "00:11:32": "Synology",
+    "00:08:9B": "QNAP",
+    "D8:6C:63": "Google",
+    "D0:03:4B": "AVM Fritz!",
+}
+
+MAC_ADDRESS_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
+HEADER_HOST_RE = re.compile(
+    r"^<\d+>[A-Za-z]{3}\s+\d+\s+[\d:]+\s+(?:[\d\.]+\s+)?(?:\[[\d\.]+\]\s+)?([A-Za-z0-9_\-\.]+):",
+    re.IGNORECASE,
+)
+DHCP_ALLOC_RE = re.compile(
+    r"DHCP.*allocated IP address\s+([\d\.]+)\s+for the\s+\[client:([0-9a-fA-F:]{17})(?:\s*\(([^)]+)\))?",
+    re.IGNORECASE,
+)
+AP_MAC_RE = re.compile(r"AP\s+MAC=([0-9a-fA-F:]{17})", re.IGNORECASE)
+MAC_SRC_IP_SRC_RE = re.compile(
+    r"MAC\s+SRC=([0-9a-fA-F:]{17})\s+IP\s+SRC=([\d\.]+)",
+    re.IGNORECASE,
+)
+
+
+def lookup_vendor(mac: Optional[str]) -> Optional[str]:
+    """Resolves MAC address OUI prefix to manufacturer name"""
+    if not mac or len(mac) < 8:
+        return None
+    prefix = mac[:8].upper().replace("-", ":")
+    return COMMON_OUIS.get(prefix)
+
+
+def parse_devices_from_syslog(source_ip: str, message: str) -> List[Dict[str, Any]]:
+    """Extracts all referenced devices (sender and mentioned clients) from a syslog line"""
+    devices: List[Dict[str, Any]] = []
+
+    # 1. Sender (Source Host)
+    sender_mac = None
+    sender_name = None
+    sender_type = "client"
+
+    ap_m = AP_MAC_RE.search(message)
+    if ap_m:
+        sender_mac = ap_m.group(1).upper().replace("-", ":")
+        sender_type = "ap"
+
+    host_m = HEADER_HOST_RE.search(message)
+    if host_m:
+        h = host_m.group(1).strip()
+        if not re.match(r"^\d+\.\d+\.\d+\.\d+$", h):
+            sender_name = h
+            hl = h.lower()
+            if any(k in hl for k in ("er", "router", "gateway")):
+                sender_type = "router"
+            elif any(k in hl for k in ("sg", "switch")):
+                sender_type = "switch"
+            elif any(k in hl for k in ("eap", "ap")):
+                sender_type = "ap"
+
+    if source_ip and (source_ip.endswith(".1") or source_ip.endswith(".254")) and sender_type == "client":
+        sender_type = "router"
+
+    devices.append({
+        "ip": source_ip,
+        "mac": sender_mac,
+        "suggested_name": sender_name,
+        "device_type": sender_type,
+        "vendor": lookup_vendor(sender_mac) if sender_mac else ("TP-Link" if sender_type in ("router", "switch", "ap") else None),
+    })
+
+    # 2. DHCP allocations
+    for dm in DHCP_ALLOC_RE.finditer(message):
+        cip = dm.group(1)
+        cmac = dm.group(2).upper().replace("-", ":")
+        cname = dm.group(3).strip() if dm.group(3) else None
+        devices.append({
+            "ip": cip,
+            "mac": cmac,
+            "suggested_name": cname,
+            "device_type": "client",
+            "vendor": lookup_vendor(cmac),
+        })
+
+    # 3. MAC SRC + IP SRC pairs
+    for ms in MAC_SRC_IP_SRC_RE.finditer(message):
+        cmac = ms.group(1).upper().replace("-", ":")
+        cip = ms.group(2)
+        if cip != "0.0.0.0" and not cip.endswith(".255") and not cip.startswith("224."):
+            devices.append({
+                "ip": cip,
+                "mac": cmac,
+                "suggested_name": None,
+                "device_type": "client",
+                "vendor": lookup_vendor(cmac),
+            })
+        else:
+            devices.append({
+                "ip": None,
+                "mac": cmac,
+                "suggested_name": None,
+                "device_type": "client",
+                "vendor": lookup_vendor(cmac),
+            })
+
+    return devices
+
+
+# ---------------------------------------------------------------------------
 # Database Management
 # ---------------------------------------------------------------------------
 class DatabaseManager:
@@ -232,6 +361,28 @@ class DatabaseManager:
                 except Exception:
                     pass
 
+                # Table: network_devices (Inventory & Suggested Names)
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS network_devices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mac TEXT UNIQUE,
+                        ip TEXT,
+                        custom_name TEXT,
+                        suggested_name TEXT,
+                        suggested_rejected TEXT,
+                        device_type TEXT DEFAULT 'client',
+                        vendor TEXT,
+                        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        log_count INTEGER DEFAULT 1
+                    );
+                    """
+                )
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_dev_mac ON network_devices(mac);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_dev_ip ON network_devices(ip);")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_dev_name ON network_devices(custom_name);")
+
                 await db.commit()
                 logger.info(f"Database initialized at {self.db_path}")
 
@@ -261,6 +412,265 @@ class DatabaseManager:
                 )
                 await db.commit()
 
+    async def upsert_device(
+        self,
+        mac: Optional[str] = None,
+        ip: Optional[str] = None,
+        suggested_name: Optional[str] = None,
+        device_type: Optional[str] = None,
+        vendor: Optional[str] = None,
+        custom_name: Optional[str] = None,
+    ) -> Optional[int]:
+        """Insert or update a network device record with MAC/IP matching & name suggestions"""
+        if not mac and not ip:
+            return None
+
+        if mac:
+            mac = mac.upper().replace("-", ":")
+            if not vendor:
+                vendor = lookup_vendor(mac)
+
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                row = None
+                if mac:
+                    cur = await db.execute("SELECT * FROM network_devices WHERE mac = ?", (mac,))
+                    row = await cur.fetchone()
+                if not row and ip:
+                    cur = await db.execute("SELECT * FROM network_devices WHERE ip = ?", (ip,))
+                    row = await cur.fetchone()
+
+                if row:
+                    dev_id = row["id"]
+                    existing_custom = row["custom_name"]
+                    existing_suggested = row["suggested_name"]
+                    existing_rejected = row["suggested_rejected"]
+                    existing_type = row["device_type"]
+                    existing_vendor = row["vendor"]
+
+                    # Decide custom name
+                    new_custom = custom_name or existing_custom
+
+                    # Decide suggested name
+                    new_suggested = existing_suggested
+                    if suggested_name:
+                        s_name = suggested_name.strip()
+                        if s_name and s_name != new_custom and s_name != existing_rejected:
+                            if not new_custom:
+                                new_suggested = s_name
+
+                    # Decide device type
+                    new_type = existing_type
+                    if device_type and device_type not in ("client", "unknown"):
+                        new_type = device_type
+
+                    new_mac = mac or row["mac"]
+                    new_ip = ip or row["ip"]
+                    new_vendor = vendor or existing_vendor
+
+                    await db.execute(
+                        """
+                        UPDATE network_devices
+                        SET mac = ?, ip = ?, custom_name = ?, suggested_name = ?,
+                            device_type = ?, vendor = ?, last_seen = CURRENT_TIMESTAMP,
+                            log_count = log_count + 1
+                        WHERE id = ?
+                        """,
+                        (new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor, dev_id),
+                    )
+                    await db.commit()
+                    return dev_id
+                else:
+                    new_mac = mac
+                    new_ip = ip
+                    new_custom = custom_name
+                    new_suggested = suggested_name
+                    new_type = device_type or "client"
+                    new_vendor = vendor
+
+                    cur = await db.execute(
+                        """
+                        INSERT INTO network_devices (mac, ip, custom_name, suggested_name, device_type, vendor, log_count)
+                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (new_mac, new_ip, new_custom, new_suggested, new_type, new_vendor),
+                    )
+                    await db.commit()
+                    return cur.lastrowid
+
+    async def get_device_by_id(self, device_id: int) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute("SELECT * FROM network_devices WHERE id = ?", (device_id,))
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def get_device_by_ip_or_mac(self, ip: Optional[str], mac: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not ip and not mac:
+            return None
+        norm_mac = mac.upper().replace("-", ":") if mac and not mac.startswith("IP-") else None
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                row = None
+                if norm_mac:
+                    cur = await db.execute("SELECT * FROM network_devices WHERE mac = ?", (norm_mac,))
+                    row = await cur.fetchone()
+                if not row and ip:
+                    cur = await db.execute("SELECT * FROM network_devices WHERE ip = ?", (ip,))
+                    row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def get_devices(
+        self,
+        search: Optional[str] = None,
+        device_type: Optional[str] = None,
+        has_suggestion: Optional[bool] = None,
+        limit: int = 300,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM network_devices WHERE 1=1"
+        params: List[Any] = []
+
+        if search:
+            s = f"%{search.strip()}%"
+            query += " AND (custom_name LIKE ? OR suggested_name LIKE ? OR ip LIKE ? OR mac LIKE ? OR vendor LIKE ?)"
+            params.extend([s, s, s, s, s])
+
+        if device_type:
+            query += " AND device_type = ?"
+            params.append(device_type.strip().lower())
+
+        if has_suggestion is True:
+            query += " AND suggested_name IS NOT NULL AND suggested_name != ''"
+
+        query += " ORDER BY (suggested_name IS NOT NULL AND suggested_name != '') DESC, log_count DESC, last_seen DESC LIMIT ?"
+        params.append(limit)
+
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(query, params)
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def get_device_counts(self) -> Dict[str, int]:
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                total = (await (await db.execute("SELECT COUNT(*) FROM network_devices")).fetchone())[0]
+                suggestions = (await (await db.execute(
+                    "SELECT COUNT(*) FROM network_devices WHERE suggested_name IS NOT NULL AND suggested_name != ''"
+                )).fetchone())[0]
+                routers = (await (await db.execute("SELECT COUNT(*) FROM network_devices WHERE device_type = 'router'")).fetchone())[0]
+                switches = (await (await db.execute("SELECT COUNT(*) FROM network_devices WHERE device_type = 'switch'")).fetchone())[0]
+                aps = (await (await db.execute("SELECT COUNT(*) FROM network_devices WHERE device_type = 'ap'")).fetchone())[0]
+                clients = (await (await db.execute("SELECT COUNT(*) FROM network_devices WHERE device_type = 'client'")).fetchone())[0]
+
+                return {
+                    "total": total,
+                    "suggestions": suggestions,
+                    "routers": routers,
+                    "switches": switches,
+                    "aps": aps,
+                    "clients": clients,
+                }
+
+    async def rename_device(self, device_id: int, new_name: str) -> bool:
+        clean_name = new_name.strip()
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute(
+                    "UPDATE network_devices SET custom_name = ?, suggested_name = NULL WHERE id = ?",
+                    (clean_name, device_id),
+                )
+                await db.commit()
+                return cur.rowcount > 0
+
+    async def accept_device_suggestion(self, device_id: int) -> bool:
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute(
+                    """
+                    UPDATE network_devices
+                    SET custom_name = suggested_name, suggested_name = NULL
+                    WHERE id = ? AND suggested_name IS NOT NULL
+                    """,
+                    (device_id,),
+                )
+                await db.commit()
+                return cur.rowcount > 0
+
+    async def reject_device_suggestion(self, device_id: int) -> bool:
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute(
+                    """
+                    UPDATE network_devices
+                    SET suggested_rejected = suggested_name, suggested_name = NULL
+                    WHERE id = ?
+                    """,
+                    (device_id,),
+                )
+                await db.commit()
+                return cur.rowcount > 0
+
+    async def backfill_devices_from_syslogs(self) -> int:
+        """Scan all stored syslog_messages to discover devices and suggested names"""
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute("SELECT source_ip, message FROM syslog_messages ORDER BY id ASC")
+                rows = await cur.fetchall()
+
+        found = 0
+        for r in rows:
+            devs = parse_devices_from_syslog(r["source_ip"], r["message"])
+            for d in devs:
+                dev_id = await self.upsert_device(
+                    mac=d.get("mac"),
+                    ip=d.get("ip"),
+                    suggested_name=d.get("suggested_name"),
+                    device_type=d.get("device_type"),
+                    vendor=d.get("vendor"),
+                )
+                if dev_id:
+                    found += 1
+
+        await self.update_syslog_device_names()
+        return found
+
+    async def update_syslog_device_names(self) -> None:
+        """Propagate resolved device names into existing syslog_messages table"""
+        devices = await self.get_devices(limit=1000)
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                for d in devices:
+                    best_name = d.get("custom_name") or d.get("suggested_name")
+                    if not best_name:
+                        continue
+                    ip = d.get("ip")
+                    mac = d.get("mac")
+                    if ip:
+                        await db.execute(
+                            """
+                            UPDATE syslog_messages
+                            SET device_name = ?
+                            WHERE source_ip = ? AND (device_name LIKE 'Omada-Device%' OR device_name IS NULL)
+                            """,
+                            (f"{best_name} ({ip})", ip),
+                        )
+                    if mac:
+                        await db.execute(
+                            """
+                            UPDATE syslog_messages
+                            SET device_name = ?
+                            WHERE device_mac = ? AND (device_name LIKE 'Omada-Device%' OR device_name IS NULL)
+                            """,
+                            (best_name, mac),
+                        )
+                await db.commit()
+
     async def get_syslogs(
         self,
         limit: int = 100,
@@ -272,33 +682,44 @@ class DatabaseManager:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch latest raw syslog messages with fine-grained filtering"""
-        query = "SELECT * FROM syslog_messages WHERE 1=1"
+        """Fetch latest raw syslog messages with fine-grained filtering and device join"""
+        query = """
+            SELECT s.id, s.timestamp, s.source_ip, s.device_name, s.device_mac, s.log_type, s.log_level, s.message,
+                   d.id AS dev_id, d.custom_name, d.suggested_name, d.device_type, d.vendor
+            FROM syslog_messages s
+            LEFT JOIN network_devices d ON (s.device_mac = d.mac OR (s.source_ip = d.ip AND s.device_mac LIKE 'IP-%'))
+            WHERE 1=1
+        """
         params: List[Any] = []
 
         if search:
-            query += " AND (message LIKE ? OR device_name LIKE ? OR device_mac LIKE ?)"
-            params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+            query += """ AND (
+                s.message LIKE ? OR s.device_name LIKE ? OR s.device_mac LIKE ? OR s.source_ip LIKE ?
+                OR d.custom_name LIKE ? OR d.suggested_name LIKE ?
+            )"""
+            s = f"%{search}%"
+            params.extend([s, s, s, s, s, s])
         if source_ip:
-            query += " AND source_ip = ?"
+            query += " AND s.source_ip = ?"
             params.append(source_ip)
         if device:
-            query += " AND (device_name LIKE ? OR device_mac LIKE ?)"
-            params.extend([f"%{device}%", f"%{device}%"])
+            query += " AND (s.device_name LIKE ? OR s.device_mac LIKE ? OR s.source_ip LIKE ? OR d.custom_name LIKE ? OR d.suggested_name LIKE ?)"
+            dev = f"%{device}%"
+            params.extend([dev, dev, dev, dev, dev])
         if log_type and log_type.upper() != "ALL":
-            query += " AND log_type = ?"
+            query += " AND s.log_type = ?"
             params.append(log_type.upper())
         if log_level and log_level.upper() != "ALL":
-            query += " AND log_level = ?"
+            query += " AND s.log_level = ?"
             params.append(log_level.upper())
         if date_from:
-            query += " AND timestamp >= ?"
+            query += " AND s.timestamp >= ?"
             params.append(date_from)
         if date_to:
-            query += " AND timestamp <= ?"
+            query += " AND s.timestamp <= ?"
             params.append(date_to)
 
-        query += " ORDER BY id DESC LIMIT ?"
+        query += " ORDER BY s.id DESC LIMIT ?"
         params.append(limit)
 
         async with self._lock:
@@ -308,15 +729,31 @@ class DatabaseManager:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
-    async def get_syslog_devices(self) -> List[str]:
-        """Get distinct device names or IPs for filter dropdown"""
+    async def get_syslog_devices(self) -> List[Dict[str, Any]]:
+        """Get device names and IPs for filter dropdown"""
+        # Read from network_devices first
+        devices = await self.get_devices(limit=300)
+        result: List[Dict[str, Any]] = []
+        seen = set()
+
+        for d in devices:
+            label = d.get("custom_name") or d.get("suggested_name") or d.get("ip") or d.get("mac")
+            val = d.get("ip") or d.get("mac")
+            if val and val not in seen:
+                seen.add(val)
+                result.append({"device_name": label, "source_ip": val, "mac": d.get("mac")})
+
+        # Also add distinct source_ips from syslog_messages if not in seen
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute(
-                    "SELECT DISTINCT device_name FROM syslog_messages WHERE device_name IS NOT NULL ORDER BY device_name"
-                )
-                rows = await cursor.fetchall()
-                return [r[0] for r in rows if r[0]]
+                cur = await db.execute("SELECT DISTINCT source_ip, device_name FROM syslog_messages LIMIT 100")
+                rows = await cur.fetchall()
+                for ip, name in rows:
+                    if ip and ip not in seen:
+                        seen.add(ip)
+                        result.append({"device_name": name or ip, "source_ip": ip, "mac": None})
+
+        return result
 
     async def cleanup_old_logs(self, retention_days: int) -> Dict[str, int]:
         """Delete syslog messages and metrics older than retention_days"""
@@ -991,6 +1428,19 @@ class OmadaClient:
             dev_mac = dev.get("mac") or dev.get("deviceMac") or "UNKNOWN-MAC"
             dev_ip = dev.get("ip") or dev.get("ipv4") or ""
 
+            # Upsert into device inventory with suggested name from controller
+            clean_type = "router" if dev_type in ("gateway", "router") else ("switch" if "switch" in dev_type else ("ap" if "ap" in dev_type else "client"))
+            try:
+                await db_mgr.upsert_device(
+                    mac=dev_mac if dev_mac != "UNKNOWN-MAC" else None,
+                    ip=dev_ip if dev_ip else None,
+                    suggested_name=dev.get("name"),
+                    device_type=clean_type,
+                    vendor="TP-Link",
+                )
+            except Exception as e:
+                logger.debug(f"Device upsert error in poller: {e}")
+
             # -------------------------------------------------------------
             # Switch Evaluation
             # -------------------------------------------------------------
@@ -1228,11 +1678,36 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
         asyncio.create_task(self.handle_syslog_message(source_ip, raw_text))
 
     async def handle_syslog_message(self, source_ip: str, message: str) -> None:
-        """Parse raw syslog line, store in SQLite, and trigger heuristics"""
-        # Extract potential MAC address or device identifier
-        mac_match = MAC_ADDRESS_RE.search(message)
-        device_mac = mac_match.group(0).upper().replace("-", ":") if mac_match else f"IP-{source_ip}"
-        device_name = f"Omada-Device ({source_ip})"
+        """Parse raw syslog line, store in SQLite, discover devices & suggestions, and trigger heuristics"""
+        # 1. Parse and upsert discovered devices from this message
+        discovered_devs = parse_devices_from_syslog(source_ip, message)
+        sender_dev = None
+        for d in discovered_devs:
+            try:
+                await db_mgr.upsert_device(
+                    mac=d.get("mac"),
+                    ip=d.get("ip"),
+                    suggested_name=d.get("suggested_name"),
+                    device_type=d.get("device_type"),
+                    vendor=d.get("vendor"),
+                )
+            except Exception as e:
+                logger.debug(f"Error upserting syslog device: {e}")
+            if d.get("ip") == source_ip and not sender_dev:
+                sender_dev = d
+
+        # 2. Determine best device_name & device_mac for this log
+        known = await db_mgr.get_device_by_ip_or_mac(source_ip, sender_dev.get("mac") if sender_dev else None)
+        if known and known.get("custom_name"):
+            device_name = f"{known['custom_name']} ({source_ip})"
+            device_mac = known.get("mac") or f"IP-{source_ip}"
+        elif known and known.get("suggested_name"):
+            device_name = f"{known['suggested_name']} ({source_ip})"
+            device_mac = known.get("mac") or f"IP-{source_ip}"
+        else:
+            mac_match = MAC_ADDRESS_RE.search(message)
+            device_mac = mac_match.group(0).upper().replace("-", ":") if mac_match else f"IP-{source_ip}"
+            device_name = f"Omada-Device ({source_ip})"
 
         # Persist ALL received syslog events into SQLite
         try:
@@ -1404,6 +1879,9 @@ async def lifespan(app: FastAPI):
     initial_stats = await db_mgr.get_stats()
     await ha_client.sync_status_sensors(initial_stats)
 
+    # Initial device inventory backfill from existing logs
+    asyncio.create_task(db_mgr.backfill_devices_from_syslogs())
+
     yield
 
     # Teardown
@@ -1417,7 +1895,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.3.0",
+    version="1.5.0",
     lifespan=lifespan,
 )
 
@@ -1719,6 +2197,61 @@ async def api_export_syslogs(
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="omada_syslogs.csv"'},
     )
+
+
+class RenameDevicePayload(BaseModel):
+    name: str
+
+
+@app.get("/api/devices")
+async def api_get_devices(
+    search: Optional[str] = Query(None),
+    device_type: Optional[str] = Query(None),
+    has_suggestion: Optional[bool] = Query(None),
+):
+    devs = await db_mgr.get_devices(
+        search=search,
+        device_type=device_type,
+        has_suggestion=has_suggestion,
+    )
+    counts = await db_mgr.get_device_counts()
+    return {"devices": devs, "counts": counts}
+
+
+@app.post("/api/devices/{device_id}/rename")
+async def api_rename_device(device_id: int, payload: RenameDevicePayload):
+    success = await db_mgr.rename_device(device_id, payload.name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Device not found")
+    await db_mgr.update_syslog_device_names()
+    dev = await db_mgr.get_device_by_id(device_id)
+    return {"success": True, "device": dev}
+
+
+@app.post("/api/devices/{device_id}/accept-suggestion")
+async def api_accept_device_suggestion(device_id: int):
+    success = await db_mgr.accept_device_suggestion(device_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Device or suggestion not found")
+    await db_mgr.update_syslog_device_names()
+    dev = await db_mgr.get_device_by_id(device_id)
+    return {"success": True, "device": dev}
+
+
+@app.post("/api/devices/{device_id}/reject-suggestion")
+async def api_reject_device_suggestion(device_id: int):
+    success = await db_mgr.reject_device_suggestion(device_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Device not found")
+    dev = await db_mgr.get_device_by_id(device_id)
+    return {"success": True, "device": dev}
+
+
+@app.post("/api/devices/rescan")
+async def api_rescan_devices():
+    discovered = await db_mgr.backfill_devices_from_syslogs()
+    counts = await db_mgr.get_device_counts()
+    return {"success": True, "devices_discovered": discovered, "counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -2254,10 +2787,53 @@ async def dashboard(request: Request):
       </div>
     </div>
 
+    <!-- Device Rename Modal -->
+    <div id="rename-device-modal" class="modal-backdrop">
+      <div class="modal-box">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+          <h3 style="font-size:1.15rem; color:#f8fafc; display:flex; align-items:center; gap:8px;">
+            <span>✏️</span> Gerät benennen
+          </h3>
+          <button onclick="closeRenameModal()" style="background:none; border:none; color:var(--text-muted); font-size:1.5rem; cursor:pointer;">&times;</button>
+        </div>
+        <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:14px;">
+          Vergib einen benutzerdefinierten Namen für dieses virtuelle Gerät (z. B. "Wohnzimmer AP", "Office Switch" oder "iPhone Timo"):
+        </p>
+
+        <div style="background:rgba(15,23,42,0.6); padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:0.8rem; font-family:monospace; color:var(--text-muted);">
+          <div>IP-Adresse: <span id="modal-dev-ip" style="color:#f8fafc;">-</span></div>
+          <div>MAC-Adresse: <span id="modal-dev-mac" style="color:#f8fafc;">-</span></div>
+          <div>Typ: <span id="modal-dev-type" style="color:#f8fafc;">-</span></div>
+        </div>
+
+        <input type="hidden" id="modal-dev-id" />
+
+        <div style="margin-bottom:14px;">
+          <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:6px; font-weight:600;">
+            Gerätename:
+          </label>
+          <input type="text" id="modal-dev-name-input" style="width:100%; padding:10px 12px; font-size:0.95rem;" placeholder="z. B. AP-Wohnzimmer" />
+        </div>
+
+        <div id="modal-dev-suggestion-box" style="display:none; margin-bottom:16px; padding:10px 14px; background:rgba(245,158,11,0.15); border:1px solid #f59e0b; border-radius:6px; font-size:0.85rem; justify-content:space-between; align-items:center;">
+          <span>💡 Vorschlag: <strong id="modal-dev-suggestion-val"></strong></span>
+          <button type="button" class="btn btn-secondary" style="padding:3px 10px; font-size:0.75rem;" onclick="applySuggestionInModal()">Übernehmen</button>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button class="btn btn-secondary" type="button" onclick="closeRenameModal()">Abbrechen</button>
+          <button class="btn btn-primary" type="button" onclick="saveDeviceName()" id="btn-save-device-name">Speichern</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Tabs Navigation -->
-    <div style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px;">
-      <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose & Vorfälle</button>
-      <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslog-Protokoll (Alle Logs)</button>
+    <div style="display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--card-border); padding-bottom:12px; flex-wrap:wrap; align-items:center;">
+      <button id="tab-btn-advisor" class="btn btn-primary" onclick="switchTab('advisor')">🛡️ Diagnose &amp; Vorfälle</button>
+      <button id="tab-btn-syslogs" class="btn btn-secondary" onclick="switchTab('syslogs')">📜 Syslog-Protokoll</button>
+      <button id="tab-btn-devices" class="btn btn-secondary" onclick="switchTab('devices')">
+        🌐 Virtuelle Geräte <span id="tab-badge-suggestions" class="badge badge-warn" style="margin-left:6px; display:none;">0</span>
+      </button>
     </div>
 
     <!-- TAB 1: Advisor View -->
@@ -2457,6 +3033,97 @@ async def dashboard(request: Request):
           <tbody id="syslogs-tbody">
             <tr>
               <td colspan="6" style="text-align:center; padding:32px; color:var(--text-muted);">Lade Protokolle...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 3: Virtual Devices View -->
+    <div id="view-devices" style="display:none;">
+      <!-- Stat Cards Grid -->
+      <div class="status-grid" style="margin-bottom:20px;">
+        <div class="card">
+          <div class="status-card-header">
+            <span>Erkannte Geräte</span>
+            <span>📱</span>
+          </div>
+          <div class="status-card-value" id="card-dev-total">0</div>
+          <div class="status-card-desc">Im Netzwerk inventarisiert</div>
+        </div>
+        <div class="card">
+          <div class="status-card-header">
+            <span>Namensvorschläge</span>
+            <span>💡</span>
+          </div>
+          <div class="status-card-value" id="card-dev-suggestions">0</div>
+          <div class="status-card-desc" id="card-dev-suggestions-desc">Warten auf Bestätigung</div>
+        </div>
+        <div class="card">
+          <div class="status-card-header">
+            <span>Infrastruktur</span>
+            <span>📡</span>
+          </div>
+          <div class="status-card-value" id="card-dev-infra">0</div>
+          <div class="status-card-desc" id="card-dev-infra-desc">0 Router, 0 Switches, 0 APs</div>
+        </div>
+        <div class="card">
+          <div class="status-card-header">
+            <span>WLAN &amp; LAN Clients</span>
+            <span>💻</span>
+          </div>
+          <div class="status-card-value" id="card-dev-clients">0</div>
+          <div class="status-card-desc">Endgeräte (DHCP &amp; WLAN)</div>
+        </div>
+      </div>
+
+      <!-- Filter Toolbar -->
+      <div class="card" style="margin-bottom:20px; padding:16px;">
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;">
+          <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; flex:1;">
+            <input type="text" id="device-search" placeholder="🔍 Suche nach Name, MAC oder IP..." 
+                   style="min-width:220px; flex:1;" oninput="debounce(loadDevices, 350)()" />
+
+            <select id="device-filter-type" onchange="loadDevices()">
+              <option value="">Alle Gerätetypen</option>
+              <option value="router">🌐 Router &amp; Gateway</option>
+              <option value="switch">🔀 Switches</option>
+              <option value="ap">📡 Access Points (APs)</option>
+              <option value="client">💻 Clients &amp; Endgeräte</option>
+            </select>
+
+            <label style="display:inline-flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-muted); cursor:pointer;">
+              <input type="checkbox" id="device-filter-suggestions" onchange="loadDevices()" />
+              Nur mit Vorschlägen
+            </label>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-secondary" onclick="rescanDevices()" id="btn-rescan-devs" title="Durchsucht alle empfangenen Syslogs nach neuen MACs und Hostnamen">
+              🔄 Syslogs nach Geräten scannen
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Devices Table -->
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th style="min-width:180px;">Gerätename</th>
+              <th style="min-width:200px;">Namensvorschlag</th>
+              <th style="width:120px;">Typ</th>
+              <th style="min-width:170px;">MAC-Adresse</th>
+              <th style="min-width:130px;">IP-Adresse</th>
+              <th style="width:90px;">Syslogs</th>
+              <th style="min-width:140px;">Zuletzt gesehen</th>
+              <th style="width:130px; text-align:center;">Aktionen</th>
+            </tr>
+          </thead>
+          <tbody id="devices-tbody">
+            <tr>
+              <td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Lade Geräte...</td>
             </tr>
           </tbody>
         </table>
@@ -2676,14 +3343,22 @@ async def dashboard(request: Request):
 
     function switchTab(tab) {{
       const isAdvisor = tab === 'advisor';
-      document.getElementById('view-advisor').style.display = isAdvisor ? 'block' : 'none';
-      document.getElementById('view-syslogs').style.display = isAdvisor ? 'none' : 'block';
-      document.getElementById('tab-btn-advisor').className = isAdvisor ? 'btn btn-primary' : 'btn btn-secondary';
-      document.getElementById('tab-btn-syslogs').className = isAdvisor ? 'btn btn-secondary' : 'btn btn-primary';
+      const isSyslogs = tab === 'syslogs';
+      const isDevices = tab === 'devices';
 
-      if (!isAdvisor) {{
+      document.getElementById('view-advisor').style.display = isAdvisor ? 'block' : 'none';
+      document.getElementById('view-syslogs').style.display = isSyslogs ? 'block' : 'none';
+      document.getElementById('view-devices').style.display = isDevices ? 'block' : 'none';
+
+      document.getElementById('tab-btn-advisor').className = isAdvisor ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tab-btn-syslogs').className = isSyslogs ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tab-btn-devices').className = isDevices ? 'btn btn-primary' : 'btn btn-secondary';
+
+      if (isSyslogs) {{
         loadSyslogDevices();
         loadSyslogs();
+      }} else if (isDevices) {{
+        loadDevices();
       }}
     }}
 
@@ -2779,9 +3454,46 @@ async def dashboard(request: Request):
           else if (l.log_level === "WARN" || l.log_level === "WARNING") levelBadge = "badge-warn";
           else if (l.log_level === "INFO") levelBadge = "badge-info";
 
-          const devLabel = l.device_name 
-            ? `<strong>${{escapeHtml(l.device_name)}}</strong><br/><span style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</span>`
-            : `<span style="font-family:monospace;">${{escapeHtml(l.source_ip || 'Unbekannt')}}</span>`;
+          let devLabel = "";
+          const devId = l.dev_id || 0;
+          const safeCustom = encodeURIComponent(l.custom_name || "");
+          const safeIp = encodeURIComponent(l.source_ip || "");
+          const safeMac = encodeURIComponent(l.device_mac || "");
+          const safeType = encodeURIComponent(l.device_type || "client");
+          const safeSuggested = encodeURIComponent(l.suggested_name || "");
+
+          if (l.custom_name) {{
+            devLabel = `
+              <div style="display:flex; align-items:center; gap:6px;">
+                <strong style="color:var(--text-main); font-size:0.9rem;">${{escapeHtml(l.custom_name)}}</strong>
+                <button class="copy-btn" style="padding:1px 5px; font-size:0.65rem;" onclick="openRenameModal(${{devId}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Gerätename bearbeiten">✏️</button>
+              </div>
+              <span style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</span>
+            `;
+          }} else if (l.suggested_name) {{
+            devLabel = `
+              <div style="display:flex; align-items:center; gap:6px;">
+                <strong>${{escapeHtml(l.device_name || l.source_ip)}}</strong>
+                <button class="copy-btn" style="padding:1px 5px; font-size:0.65rem;" onclick="openRenameModal(${{devId}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Gerätename bearbeiten">✏️</button>
+              </div>
+              <span style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</span>
+              <div style="display:inline-flex; align-items:center; gap:4px; margin-top:3px;">
+                <span class="badge badge-warn" style="font-size:0.68rem;" title="Automatischer Namensvorschlag">💡 ${{escapeHtml(l.suggested_name)}}</span>
+                <button class="btn btn-primary" style="padding:1px 5px; font-size:0.65rem;" onclick="acceptDeviceSuggestionFromSyslog(${{devId}})" title="Vorschlag annehmen">✓</button>
+                <button class="btn btn-secondary" style="padding:1px 5px; font-size:0.65rem;" onclick="rejectDeviceSuggestionFromSyslog(${{devId}})" title="Vorschlag ablehnen">✕</button>
+              </div>
+            `;
+          }} else if (l.device_name) {{
+            devLabel = `
+              <div style="display:flex; align-items:center; gap:6px;">
+                <strong>${{escapeHtml(l.device_name)}}</strong>
+                <button class="copy-btn" style="padding:1px 5px; font-size:0.65rem;" onclick="openRenameModal(${{devId}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Gerät benennen">✏️</button>
+              </div>
+              <span style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;">${{escapeHtml(l.source_ip || '')}}</span>
+            `;
+          }} else {{
+            devLabel = `<span style="font-family:monospace;">${{escapeHtml(l.source_ip || 'Unbekannt')}}</span>`;
+          }}
 
           const escapedMsg = escapeHtml(l.message || '');
           const rawForAttr = encodeURIComponent(l.message || '');
@@ -2871,6 +3583,260 @@ async def dashboard(request: Request):
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
     }}
+
+    // Virtual Devices Management
+    async function loadDevices() {{
+      const search = document.getElementById("device-search") ? document.getElementById("device-search").value.trim() : "";
+      const devType = document.getElementById("device-filter-type") ? document.getElementById("device-filter-type").value : "";
+      const onlySuggestions = document.getElementById("device-filter-suggestions") ? document.getElementById("device-filter-suggestions").checked : false;
+
+      const params = new URLSearchParams();
+      if (search) params.set("search", search);
+      if (devType) params.set("device_type", devType);
+      if (onlySuggestions) params.set("has_suggestion", "true");
+
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices?${{params.toString()}}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const devs = data.devices || [];
+        const counts = data.counts || {{}};
+
+        // Update cards & badges
+        document.getElementById("card-dev-total").innerText = counts.total || 0;
+        document.getElementById("card-dev-suggestions").innerText = counts.suggestions || 0;
+        document.getElementById("card-dev-infra").innerText = (counts.routers || 0) + (counts.switches || 0) + (counts.aps || 0);
+        document.getElementById("card-dev-infra-desc").innerText = `${{counts.routers || 0}} Router, ${{counts.switches || 0}} Switches, ${{counts.aps || 0}} APs`;
+        document.getElementById("card-dev-clients").innerText = counts.clients || 0;
+
+        const sugBadge = document.getElementById("tab-badge-suggestions");
+        if (sugBadge) {{
+          if (counts.suggestions > 0) {{
+            sugBadge.style.display = "inline-block";
+            sugBadge.innerText = `${{counts.suggestions}} Vorschläge`;
+          }} else {{
+            sugBadge.style.display = "none";
+          }}
+        }}
+
+        const tbody = document.getElementById("devices-tbody");
+        if (devs.length === 0) {{
+          tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted);">Keine Geräte mit diesen Filtern gefunden.</td></tr>`;
+          return;
+        }}
+
+        tbody.innerHTML = devs.map(d => {{
+          let typeIcon = "💻";
+          let typeBadge = "badge-gray";
+          if (d.device_type === "router") {{ typeIcon = "🌐"; typeBadge = "badge-crit"; }}
+          else if (d.device_type === "switch") {{ typeIcon = "🔀"; typeBadge = "badge-cat"; }}
+          else if (d.device_type === "ap") {{ typeIcon = "📡"; typeBadge = "badge-warn"; }}
+
+          const displayName = d.custom_name || `<span style="color:var(--text-muted); font-style:italic;">Unbenannt</span>`;
+          const vendorStr = d.vendor ? `<span class="badge badge-cat" style="font-size:0.65rem; margin-left:4px;">${{escapeHtml(d.vendor)}}</span>` : "";
+
+          let suggestionHtml = `<span style="color:var(--text-muted); font-size:0.8rem;">-</span>`;
+          if (d.suggested_name) {{
+            suggestionHtml = `
+              <div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <span class="badge badge-warn" style="font-size:0.75rem;">💡 ${{escapeHtml(d.suggested_name)}}</span>
+                <button class="btn btn-primary" style="padding:2px 8px; font-size:0.75rem;" onclick="acceptSuggestion(${{d.id}})" title="Vorschlag annehmen">✓ Annehmen</button>
+                <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.75rem;" onclick="rejectSuggestion(${{d.id}})" title="Vorschlag ablehnen">✕ Ablehnen</button>
+              </div>
+            `;
+          }}
+
+          const safeCustom = encodeURIComponent(d.custom_name || "");
+          const safeIp = encodeURIComponent(d.ip || "");
+          const safeMac = encodeURIComponent(d.mac || "");
+          const safeType = encodeURIComponent(d.device_type || "client");
+          const safeSuggested = encodeURIComponent(d.suggested_name || "");
+
+          return `
+            <tr>
+              <td>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <strong style="font-size:0.95rem;">${{displayName}}</strong>
+                  <button class="copy-btn" style="padding:2px 6px;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')" title="Name bearbeiten">✏️</button>
+                </div>
+              </td>
+              <td>${{suggestionHtml}}</td>
+              <td><span class="badge ${{typeBadge}}">${{typeIcon}} ${{d.device_type || 'client'}}</span></td>
+              <td style="font-family:monospace; font-size:0.82rem;">${{d.mac || '-'}} ${{vendorStr}}</td>
+              <td style="font-family:monospace; font-size:0.82rem;">${{d.ip || '-'}}</td>
+              <td style="font-size:0.85rem;"><span class="badge badge-gray">${{d.log_count || 1}} Logs</span></td>
+              <td style="font-size:0.8rem; color:var(--text-muted); white-space:nowrap;">${{d.last_seen || ''}}</td>
+              <td style="text-align:center;">
+                <div style="display:inline-flex; gap:6px;">
+                  <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="openRenameModal(${{d.id}}, '${{safeCustom}}', '${{safeIp}}', '${{safeMac}}', '${{safeType}}', '${{safeSuggested}}')">✏️ Umbenennen</button>
+                  <button class="btn btn-secondary" style="padding:4px 8px; font-size:0.75rem;" onclick="filterSyslogByDevice('${{d.ip || d.mac || ''}}')" title="Logs dieses Geräts anzeigen">📜 Logs</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }}).join("");
+
+      }} catch (err) {{
+        console.error("Failed to load devices:", err);
+      }}
+    }}
+
+    function openRenameModal(id, encName, encIp, encMac, encType, encSuggested) {{
+      const name = decodeURIComponent(encName || "");
+      const ip = decodeURIComponent(encIp || "");
+      const mac = decodeURIComponent(encMac || "");
+      const devType = decodeURIComponent(encType || "client");
+      const suggested = decodeURIComponent(encSuggested || "");
+
+      document.getElementById("modal-dev-id").value = id;
+      document.getElementById("modal-dev-ip").innerText = ip || "Keine IP";
+      document.getElementById("modal-dev-mac").innerText = mac || "Keine MAC";
+      document.getElementById("modal-dev-type").innerText = devType.toUpperCase();
+      document.getElementById("modal-dev-name-input").value = name;
+
+      const sugBox = document.getElementById("modal-dev-suggestion-box");
+      const sugVal = document.getElementById("modal-dev-suggestion-val");
+      if (suggested) {{
+        sugBox.style.display = "flex";
+        sugVal.innerText = suggested;
+      }} else {{
+        sugBox.style.display = "none";
+      }}
+
+      document.getElementById("rename-device-modal").style.display = "flex";
+      document.getElementById("modal-dev-name-input").focus();
+    }}
+
+    function closeRenameModal() {{
+      document.getElementById("rename-device-modal").style.display = "none";
+    }}
+
+    function applySuggestionInModal() {{
+      const sug = document.getElementById("modal-dev-suggestion-val").innerText;
+      if (sug) {{
+        document.getElementById("modal-dev-name-input").value = sug;
+      }}
+    }}
+
+    async function saveDeviceName() {{
+      const id = document.getElementById("modal-dev-id").value;
+      const name = document.getElementById("modal-dev-name-input").value.trim();
+      const btn = document.getElementById("btn-save-device-name");
+
+      if (!name) {{
+        alert("Bitte gib einen Gerätenamen ein.");
+        return;
+      }}
+
+      btn.innerText = "⏳ Speichern...";
+      btn.disabled = true;
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices/${{id}}/rename`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ name: name }})
+        }});
+        if (res.ok) {{
+          closeRenameModal();
+          loadDevices();
+          loadSyslogs();
+          loadSyslogDevices();
+        }} else {{
+          alert("Fehler beim Speichern des Gerätenamens.");
+        }}
+      }} catch (err) {{
+        alert("Fehler: " + err.message);
+      }} finally {{
+        btn.innerText = "Speichern";
+        btn.disabled = false;
+      }}
+    }}
+
+    async function acceptSuggestion(id) {{
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices/${{id}}/accept-suggestion`, {{ method: "POST" }});
+        if (res.ok) {{
+          loadDevices();
+          loadSyslogs();
+          loadSyslogDevices();
+        }}
+      }} catch (err) {{
+        console.error("Failed to accept suggestion:", err);
+      }}
+    }}
+
+    async function rejectSuggestion(id) {{
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices/${{id}}/reject-suggestion`, {{ method: "POST" }});
+        if (res.ok) {{
+          loadDevices();
+          loadSyslogs();
+          loadSyslogDevices();
+        }}
+      }} catch (err) {{
+        console.error("Failed to reject suggestion:", err);
+      }}
+    }}
+
+    async function acceptDeviceSuggestionFromSyslog(devId) {{
+      if (!devId) return;
+      await acceptSuggestion(devId);
+    }}
+
+    async function rejectDeviceSuggestionFromSyslog(devId) {{
+      if (!devId) return;
+      await rejectSuggestion(devId);
+    }}
+
+    async function rescanDevices() {{
+      const btn = document.getElementById("btn-rescan-devs");
+      if (btn) {{
+        btn.innerText = "⏳ Scanne Logs...";
+        btn.disabled = true;
+      }}
+      try {{
+        const res = await fetch(`${{ROOT_PATH}}/api/devices/rescan`, {{ method: "POST" }});
+        const data = await res.json();
+        loadDevices();
+        loadSyslogs();
+        loadSyslogDevices();
+        alert(`Scan abgeschlossen! ${{data.devices_discovered || 0}} Geräte erkannt / aktualisiert.`);
+      }} catch (err) {{
+        alert("Scan fehlgeschlagen: " + err.message);
+      }} finally {{
+        if (btn) {{
+          btn.innerText = "🔄 Syslogs nach Geräten scannen";
+          btn.disabled = false;
+        }}
+      }}
+    }}
+
+    function filterSyslogByDevice(val) {{
+      if (!val) return;
+      switchTab('syslogs');
+      const searchInput = document.getElementById("syslog-search");
+      if (searchInput) {{
+        searchInput.value = val;
+        loadSyslogs();
+      }}
+    }}
+
+    // Initial load & cyclic refresh
+    loadStatus();
+    loadTrends();
+    loadIncidents();
+    loadDevices();
+
+    setInterval(() => {{
+      loadStatus();
+      if (document.getElementById('view-advisor').style.display !== 'none') {{
+        loadIncidents();
+      }} else if (document.getElementById('view-syslogs').style.display !== 'none') {{
+        loadSyslogs();
+      }} else if (document.getElementById('view-devices').style.display !== 'none') {{
+        loadDevices();
+      }}
+    }}, 10000);
 
     async function openNotifyModal() {{
       const modal = document.getElementById("notify-modal");

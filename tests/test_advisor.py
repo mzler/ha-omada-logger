@@ -4,8 +4,123 @@ Unit and integration tests for Omada Diagnostic Advisor heuristics and DB logic.
 
 import re
 import sqlite3
+import sys
 import unittest
 from pathlib import Path
+
+COMMON_OUIS = {
+    "00:0A:EB": "TP-Link",
+    "0C:EF:15": "TP-Link",
+    "20:23:51": "TP-Link",
+    "50:ED:3C": "TP-Link",
+    "5A:22:A0": "TP-Link",
+    "B0:4E:26": "TP-Link",
+    "E8:48:B8": "TP-Link",
+    "98:DA:C4": "TP-Link",
+    "04:17:B6": "Apple",
+    "A0:B7:65": "Apple",
+    "98:03:8E": "Apple",
+    "BC:D0:74": "Apple",
+    "F4:34:F0": "Apple",
+    "DC:A6:32": "Raspberry Pi",
+    "B8:27:EB": "Raspberry Pi",
+    "E4:5F:01": "Raspberry Pi",
+    "24:4C:E3": "Espressif",
+    "30:AE:A4": "Espressif",
+    "84:CC:A8": "Espressif",
+    "C4:4F:33": "Espressif",
+}
+
+HEADER_HOST_RE = re.compile(
+    r"^<\d+>[A-Za-z]{3}\s+\d+\s+[\d:]+\s+(?:[\d\.]+\s+)?(?:\[[\d\.]+\]\s+)?([A-Za-z0-9_\-\.]+):",
+    re.IGNORECASE,
+)
+DHCP_ALLOC_RE = re.compile(
+    r"DHCP.*allocated IP address\s+([\d\.]+)\s+for the\s+\[client:([0-9a-fA-F:]{17})(?:\s*\(([^)]+)\))?",
+    re.IGNORECASE,
+)
+AP_MAC_RE = re.compile(r"AP\s+MAC=([0-9a-fA-F:]{17})", re.IGNORECASE)
+MAC_SRC_IP_SRC_RE = re.compile(
+    r"MAC\s+SRC=([0-9a-fA-F:]{17})\s+IP\s+SRC=([\d\.]+)",
+    re.IGNORECASE,
+)
+
+
+def lookup_vendor(mac):
+    if not mac or len(mac) < 8:
+        return None
+    prefix = mac[:8].upper().replace("-", ":")
+    return COMMON_OUIS.get(prefix)
+
+
+def parse_devices_from_syslog(source_ip, message):
+    devices = []
+    sender_mac = None
+    sender_name = None
+    sender_type = "client"
+
+    ap_m = AP_MAC_RE.search(message)
+    if ap_m:
+        sender_mac = ap_m.group(1).upper().replace("-", ":")
+        sender_type = "ap"
+
+    host_m = HEADER_HOST_RE.search(message)
+    if host_m:
+        h = host_m.group(1).strip()
+        if not re.match(r"^\d+\.\d+\.\d+\.\d+$", h):
+            sender_name = h
+            hl = h.lower()
+            if any(k in hl for k in ("er", "router", "gateway")):
+                sender_type = "router"
+            elif any(k in hl for k in ("sg", "switch")):
+                sender_type = "switch"
+            elif any(k in hl for k in ("eap", "ap")):
+                sender_type = "ap"
+
+    if source_ip and (source_ip.endswith(".1") or source_ip.endswith(".254")) and sender_type == "client":
+        sender_type = "router"
+
+    devices.append({
+        "ip": source_ip,
+        "mac": sender_mac,
+        "suggested_name": sender_name,
+        "device_type": sender_type,
+        "vendor": lookup_vendor(sender_mac) if sender_mac else ("TP-Link" if sender_type in ("router", "switch", "ap") else None),
+    })
+
+    for dm in DHCP_ALLOC_RE.finditer(message):
+        cip = dm.group(1)
+        cmac = dm.group(2).upper().replace("-", ":")
+        cname = dm.group(3).strip() if dm.group(3) else None
+        devices.append({
+            "ip": cip,
+            "mac": cmac,
+            "suggested_name": cname,
+            "device_type": "client",
+            "vendor": lookup_vendor(cmac),
+        })
+
+    for ms in MAC_SRC_IP_SRC_RE.finditer(message):
+        cmac = ms.group(1).upper().replace("-", ":")
+        cip = ms.group(2)
+        if cip != "0.0.0.0" and not cip.endswith(".255") and not cip.startswith("224."):
+            devices.append({
+                "ip": cip,
+                "mac": cmac,
+                "suggested_name": None,
+                "device_type": "client",
+                "vendor": lookup_vendor(cmac),
+            })
+        else:
+            devices.append({
+                "ip": None,
+                "mac": cmac,
+                "suggested_name": None,
+                "device_type": "client",
+                "vendor": lookup_vendor(cmac),
+            })
+
+    return devices
 
 # Verify regexes from app.py
 INFORM_TIMEOUT_RE = re.compile(r"(Inform timeout|timeout isolated)", re.IGNORECASE)
@@ -214,6 +329,98 @@ class TestDatabaseSchema(unittest.TestCase):
 
         channel_2g_util_normal = 42
         self.assertFalse(channel_2g_util_normal > 80)
+
+
+class TestDeviceInventory(unittest.TestCase):
+    def test_vendor_lookup(self):
+        self.assertEqual(lookup_vendor("04:17:B6:97:0E:DC"), "Apple")
+        self.assertEqual(lookup_vendor("0C:EF:15:1B:BE:FE"), "TP-Link")
+        self.assertEqual(lookup_vendor("24:4C:E3:11:22:33"), "Espressif")
+        self.assertIsNone(lookup_vendor("00:00:00:00:00:00"))
+
+    def test_parse_devices_from_dhcp_log(self):
+        msg = "<13>Nov 10 22:05:41 ER605: 2026-11-10 22:05:41 dhcp_server<5>: [OMADA]DHCP Server allocated IP address 192.168.0.187 for the [client:04:17:b6:97:0e:dc ]."
+        devs = parse_devices_from_syslog("192.168.0.1", msg)
+
+        # Should find router (sender) and allocated client
+        sender = next((d for d in devs if d.get("suggested_name") == "ER605"), None)
+        self.assertIsNotNone(sender)
+        self.assertEqual(sender["device_type"], "router")
+        self.assertEqual(sender["ip"], "192.168.0.1")
+
+        client = next((d for d in devs if d.get("mac") == "04:17:B6:97:0E:DC"), None)
+        self.assertIsNotNone(client)
+        self.assertEqual(client["ip"], "192.168.0.187")
+        self.assertEqual(client["device_type"], "client")
+        self.assertEqual(client["vendor"], "Apple")
+
+    def test_parse_devices_from_ap_log(self):
+        msg = "<6>Nov 10 22:05:43 192.168.0.173 [1794344739.090063089] AP MAC=0c:ef:15:1b:be:fe MAC SRC=04:17:b6:97:0e:dc IP SRC=0.0.0.0 IP DST=255.255.255.255 IP proto=17 SPT=68 DPT=67 [1794344743.450063091] AP MAC=0c:ef:15:1b:be:fe MAC SRC=98:03:8e:9c:5c:57 IP SRC=192.168.0.138 IP DST=192.168.0.171 IP proto=1"
+        devs = parse_devices_from_syslog("192.168.0.173", msg)
+
+        ap = next((d for d in devs if d.get("mac") == "0C:EF:15:1B:BE:FE"), None)
+        self.assertIsNotNone(ap)
+        self.assertEqual(ap["device_type"], "ap")
+        self.assertEqual(ap["ip"], "192.168.0.173")
+
+        c2 = next((d for d in devs if d.get("mac") == "98:03:8E:9C:5C:57"), None)
+        self.assertIsNotNone(c2)
+        self.assertEqual(c2["ip"], "192.168.0.138")
+        self.assertEqual(c2["vendor"], "Apple")
+
+    def test_sqlite_network_devices_schema_and_actions(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.execute(
+            """
+            CREATE TABLE network_devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac TEXT UNIQUE,
+                ip TEXT,
+                custom_name TEXT,
+                suggested_name TEXT,
+                suggested_rejected TEXT,
+                device_type TEXT DEFAULT 'client',
+                vendor TEXT,
+                first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                log_count INTEGER DEFAULT 1
+            );
+            """
+        )
+
+        # 1. Insert device with suggestion
+        con.execute(
+            "INSERT INTO network_devices (mac, ip, suggested_name, device_type) VALUES (?, ?, ?, ?)",
+            ("0C:EF:15:1B:BE:FE", "192.168.0.173", "EAP653-Flur", "ap"),
+        )
+        con.commit()
+
+        row = con.execute("SELECT * FROM network_devices WHERE mac = '0C:EF:15:1B:BE:FE'").fetchone()
+        self.assertIsNone(row["custom_name"])
+        self.assertEqual(row["suggested_name"], "EAP653-Flur")
+
+        # 2. Accept suggestion
+        con.execute("UPDATE network_devices SET custom_name = suggested_name, suggested_name = NULL WHERE id = 1")
+        con.commit()
+
+        row_accepted = con.execute("SELECT * FROM network_devices WHERE id = 1").fetchone()
+        self.assertEqual(row_accepted["custom_name"], "EAP653-Flur")
+        self.assertIsNone(row_accepted["suggested_name"])
+
+        # 3. Reject suggestion on another device
+        con.execute(
+            "INSERT INTO network_devices (mac, ip, suggested_name, device_type) VALUES (?, ?, ?, ?)",
+            ("04:17:B6:97:0E:DC", "192.168.0.187", "Unknown-iOS", "client"),
+        )
+        con.commit()
+
+        con.execute("UPDATE network_devices SET suggested_rejected = suggested_name, suggested_name = NULL WHERE id = 2")
+        con.commit()
+
+        row_rejected = con.execute("SELECT * FROM network_devices WHERE id = 2").fetchone()
+        self.assertEqual(row_rejected["suggested_rejected"], "Unknown-iOS")
+        self.assertIsNone(row_rejected["suggested_name"])
 
 
 if __name__ == "__main__":

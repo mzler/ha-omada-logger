@@ -2,6 +2,25 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.5.0] - 2026-11-10
+### Hinzugefügt
+- **Automatische Geräteerkennung aus Syslog-Meldungen**:
+  - Extrahiert automatisch Hostnamen aus Syslog-Headern (z. B. `ER605`, `TL-SG2008P`, `EAP610`), Access-Point-MACs (`AP MAC=...`), DHCP-Server-Zuweisungen (`DHCP allocated IP ... for client [MAC]`) und Quell-IPs/MACs.
+  - Erkennt automatisch Gerätetypen: 🌐 Router & Gateway, 🔀 Switch, 📡 Access Point (AP), 💻 WLAN/LAN Client.
+  - Integrierte OUI-Herstellererkennung (Apple, TP-Link, Espressif, Raspberry Pi, Synology, AVM etc.).
+- **Virtuelle Geräteverwaltung (Neuer Dashboard-Tab "🌐 Virtuelle Geräte")**:
+  - Inventar-Übersicht aller erkannten Geräte im Netzwerk mit 4 Statistik-Karten.
+  - Suche nach Name, IP oder MAC sowie Filter nach Gerätetyp und offenen Vorschlägen.
+  - **Namensvorschläge annehmen & ablehnen**:
+    - Automatisch entdeckte Namen werden als Vorschlag angezeigt (`💡 ER605`).
+    - Ein-Klick-Buttons **[✓ Annehmen]** (übernimmt den Namen dauerhaft) und **[✕ Ablehnen]** (verwirft den Vorschlag permanent).
+    - Vorschläge können direkt in der Gerätetabelle sowie inline in der Syslog-Tabelle bestätigt oder abgelehnt werden.
+  - **Manuelle Namensvergabe**: Jedes Gerät kann über ein elegantes modales Dialogfeld (✏️-Button) frei benannt und umbenannt werden (z. B. "Wohnzimmer AP", "Office Switch", "iPhone Timo").
+- **Integration in Syslog-Tabelle & Schnellsprung**:
+  - Die Spalte `Gerät / Quell-IP` zeigt nun sofort den vergebenen oder vorgeschlagenen Gerätenamen statt generischer Platzhalter.
+  - In der Gerätetabelle springt der Button "📜 Logs" direkt in den Syslog-Tab und filtert alle Meldungen des gewählten Geräts.
+  - Automatischer Backfill-Scan aller bereits empfangenen Syslogs beim Start sowie manueller Button *"🔄 Syslogs nach Geräten scannen"*.
+
 ## [1.4.0] - 2026-11-10
 ### Hinzugefügt
 - **Persistente Syslog-Speicherung & Retention-Policy**:
