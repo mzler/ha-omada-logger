@@ -2,6 +2,22 @@
 
 Alle nennenswerten Änderungen an diesem Add-on werden in dieser Datei dokumentiert.
 
+## [1.7.1] - 2026-11-11
+### Hinzugefügt & Verbessert
+- **Automatische Versionszählung bei jedem Push**:
+  - `scripts/bump_version.py`: Semantisches Hochzählen von Patch-, Minor- oder Major-Versionen mit `config.yaml` als zentraler Single Source of Truth.
+  - `scripts/push.sh`: Automatisierter Release- & Push-Workflow, der vor dem Push automatisch die Versionsnummer erhöht und committet.
+  - Git Pre-Push Hook (`.git/hooks/pre-push`): Fängt unversionierte Pushes automatisch ab, erhöht die Patch-Version und committet/pusht diese.
+  - Dynamische Versionsanzeige: `app.py` liest die Version dynamisch aus `config.yaml` aus und blendet das Versions-Badge (z. B. `v1.7.1`) in der WebUI-Kopfzeile und in `/api/status` ein.
+- **Mobile Darstellung für Smartphone Hochformat (Portrait-Modus)**:
+  - Optimierung für schmale Bildschirme (~360px – 430px) mit `viewport-fit=cover` und reduzierten Rändern (`safe-area-inset-*`).
+  - Touch-optimierte Aktionsleiste im Header als 2-Spalten Grid.
+  - Segmented-Control Reiter für Haupt-Tabs und Sub-Tabs mit voller Daumen-Touch-Erreichbarkeit.
+  - Karten-Layout für Tabellen mit abgesetzten Log-Blöcken und Touch-optimierten Vollbreite-Aktionsbuttons.
+  - Scrollbare Switch-Port-Matrix innerhalb von Dialogen ohne vertikales Ausufern.
+  - Dynamisch ausgedünnte Stundenbeschriftung im 24h-Trend-Diagramm.
+  - Zentriertes Toast-Feedback am unteren Bildschirmrand.
+
 ## [1.7.0] - 2026-11-11
 ### Hinzugefügt & Erweitert ("Alle Features")
 - **Erweiterte Hardware- & Geräte-Informationen**:

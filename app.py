@@ -2435,10 +2435,29 @@ async def lifespan(app: FastAPI):
     logger.info("Omada Diagnostic Advisor background tasks terminated.")
 
 
+def get_app_version() -> str:
+    """Read addon version dynamically from config.yaml or fallback."""
+    try:
+        cfg_path = Path(__file__).resolve().parent / "config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("version:"):
+                        v = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                        if v:
+                            return v
+    except Exception:
+        pass
+    return "1.7.0"
+
+
+APP_VERSION = get_app_version()
+
 app = FastAPI(
     title="Omada Diagnostic Advisor",
     description="Proaktive Fehlerfrüherkennung und Handlungsempfehlungen für TP-Link Omada Netzwerke",
-    version="1.7.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -2458,6 +2477,7 @@ async def api_get_status():
     stats = await db_mgr.get_stats()
     return {
         "status": "healthy",
+        "version": APP_VERSION,
         "omada_controller": omada_client.last_poll_status,
         "stats": stats,
         "syslog_messages_received": syslog_protocol_instance.message_count,
@@ -3685,7 +3705,7 @@ async def dashboard(request: Request):
     <header>
       <div class="title-area">
         <h1>
-          <span>🛡️</span> Omada Diagnostic Advisor
+          <span>🛡️</span> Omada Diagnostic Advisor <span style="font-size:0.75rem; color:var(--text-muted); font-weight:600; font-family:monospace; background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:6px; border:1px solid var(--card-border); vertical-align:middle;">v{APP_VERSION}</span>
         </h1>
         <p>Proaktives TP-Link Omada Netzwerk-Monitoring, Syslog-Heuristik & Handlungsempfehlungen</p>
       </div>
